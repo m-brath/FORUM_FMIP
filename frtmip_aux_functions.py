@@ -1,0 +1,416 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Feb 25 11:24:07 2026
+
+@author: u242031
+"""
+import re
+import numpy as np
+import periodictable as pt
+from scipy import constants as scc
+
+
+
+
+# =============================================================================
+# %% paths/constants
+# =============================================================================
+
+#universal gas constant
+R=scc.R
+
+#gravity
+g=scc.g  # m s^{-2}
+
+#Avogadro constant
+N_A=scc.Avogadro
+
+#atomic mass
+m_a=scc.atomic_mass
+
+# Radius of Earth
+R_e = 6371229  # m
+
+# Molar mass of dry air# Donald P. Gatley, Sebastian Herrmann & Hans-Joachim Kretzschmar
+# (2008) A Twenty-First Century Molar Mass for Dry Air, HVAC&R Research, 14:5, 655-662, DOI:
+# 10.1080/10789669.2008.10391032
+M_d = 28.965369e-3  # kg mol^-1
+
+R_D = R / M_d  # J K^-1 kg^-1
+
+
+
+# =============================================================================
+# Helper: molecular formula formatter
+# =============================================================================
+
+# Build lookup sets from the periodic table.
+_ONE_LETTER_ELEMENTS = {el.symbol.lower() for el in pt.elements if len(el.symbol) == 1}
+_ALL_TWO_LETTER_ELEMENTS = {el.symbol.lower() for el in pt.elements if len(el.symbol) == 2}
+
+# Use a 2-letter match ONLY when its second character is NOT itself a valid
+# 1-letter element. This avoids ambiguities like:
+#   "co" → Co (cobalt) vs C + O (carbon monoxide) — prefer C+O  ✓
+#   "no" → No (nobelium) vs N + O (nitric oxide)  — prefer N+O  ✓
+#   "ho" → Ho (holmium)  vs H + O (hydroxyl)      — prefer H+O  ✓
+# but keeps unambiguous 2-letter symbols:
+#   "cl" → Cl  ('l' is not an element)  ✓
+#   "br" → Br  ('r' is not an element)  ✓
+#   "si" → Si  ('i' is Iodine, so this will fall through to S+I — acceptable)
+_SAFE_TWO_LETTER = {
+    sym for sym in _ALL_TWO_LETTER_ELEMENTS
+    if sym[1] not in _ONE_LETTER_ELEMENTS
+}
+
+
+def format_molecular_formula(formula: str) -> str:
+    """Convert a molecular formula string to the correct chemical notation
+    with proper upper- and lowercase letters.
+
+    The parser is case-insensitive on input and resolves element boundaries
+    by trying 2-letter symbols first (only for common, unambiguous elements),
+    then falling back to single-letter symbols.
+
+    Examples
+    --------
+    >>> format_molecular_formula('h2o')   # 'H2O'
+    >>> format_molecular_formula('HCL')   # 'HCl'
+    >>> format_molecular_formula('CH3CL') # 'CH3Cl'
+    >>> format_molecular_formula('HOCL')  # 'HOCl'
+    >>> format_molecular_formula('co2')   # 'CO2'
+    """
+    s = formula.lower()
+    result = []
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if c.isalpha():
+            # Try 2-letter element symbol first (only "safe" ones where the
+            # 2nd char is not itself a standalone 1-letter element, to avoid
+            # Co vs C+O, No vs N+O, Ho vs H+O, etc.).
+            two = s[i: i + 2] if i + 1 < len(s) and s[i + 1].isalpha() else ''
+            if two and two in _SAFE_TWO_LETTER:
+                result.append(two.capitalize())
+                i += 2
+            else:
+                result.append(c.upper())
+                i += 1
+        else:
+            result.append(c)
+            i += 1
+    return ''.join(result)
+
+
+def format_species_list(species: list[str]) -> list[str]:
+    """Apply :func:`format_molecular_formula` to every entry in *species*."""
+    species_list = [format_molecular_formula(s) for s in species]
+
+    # now we need to replace CFC-14 with its molecular formula CF4
+    species_list = [s.replace('CFC14', 'CF4') for s in species_list]
+    return species_list
+
+
+def molecular_mass(formula: str) -> float:
+    """Calculate the molar mass of a molecule from its molecular formula.
+
+    The formula must use correct capitalisation (e.g. 'H2O', 'CO2', 'HCl').
+    Use :func:`format_molecular_formula` first if the input case is uncertain.
+
+    Parameters
+    ----------
+    formula : str
+        Properly capitalised molecular formula (e.g. 'CH3Cl', 'HCl', 'N2O').
+
+    Returns
+    -------
+    float
+        Molar mass in g mol⁻¹.
+
+    Examples
+    --------
+    >>> molecular_mass('H2O')   # 18.015
+    >>> molecular_mass('CO2')   # 44.010
+    >>> molecular_mass('HCl')   # 36.461
+    """
+    mass = 0.0
+    for symbol, count in re.findall(r'([A-Z][a-z]?)(\d*)', formula):        
+        if not symbol:
+            continue
+        n = int(count) if count else 1
+        mass += pt.elements.symbol(symbol).mass * n
+    return mass*N_A*m_a, mass
+
+
+def get_species_masses(species: list[str]) -> dict[str, float]:
+    """Return a dict mapping each species formula to its molar mass in g mol⁻¹.
+
+    Parameters
+    ----------
+    species : list[str]
+        List of properly capitalised molecular formula strings, e.g. as
+        returned by :func:`format_species_list`.
+
+    Returns
+    -------
+    dict[str, float]
+        ``{formula: molar_mass_g_per_mol}`` for every entry in *species*.
+
+    Examples
+    --------
+    >>> get_species_masses(['H2O', 'CO2', 'O3'])
+    {'H2O': 18.015, 'CO2': 44.010, 'O3': 47.998}
+    """
+
+    output={}
+    for s in species:
+
+        # hardcode some special cases for CFC-11 and CFC-12
+        if s == 'CFC11':
+            output[s], _ = molecular_mass('CCl3F')
+        elif s == 'CFC12':
+            output[s], _ = molecular_mass('CCl2F2')
+        else:
+            output[s], _ = molecular_mass(s)
+
+    return output
+
+
+# =============================================================================
+# %% aux
+# =============================================================================
+
+def convert_time(data, obs_type):
+    """
+    Convert time variables from a dataset to an array of numpy datetime64 objects.
+    This function extracts time and date information from a dataset containing
+    observation data in either 'arsa' or 'iasi' format, and converts them into
+    numpy datetime64 objects.
+    Parameters
+    ----------
+    data : xarray.Dataset or dict-like
+        The dataset containing the time variables. It must include variables
+        named 'hhmmss{obs_type}' and 'yyyymmdd{obs_type}', where {obs_type}
+        is either 'arsa' or 'iasi'.
+        - 'hhmmss{obs_type}': Time in HHMMSS format (e.g., 123456 for 12:34:56).
+        - 'yyyymmdd{obs_type}': Date in YYYYMMDD format (e.g., 230101 for 2023-01-01).
+          Note: The year is stored as a 2-digit value and 2000 is added to it.
+    obs_type : str
+        The type of observation data. Must be either 'arsa' or 'iasi'.
+    Returns
+    -------
+    numpy.ndarray
+        An array of numpy datetime64 objects representing the converted timestamps
+        in the format 'YYYY-MM-DDTHH:MM:SS'.
+    Raises
+    ------
+    ValueError
+        If `obs_type` is not 'arsa' or 'iasi'.
+    Examples
+    --------
+    >>> import numpy as np
+    >>> import xarray as xr
+    >>> data = xr.Dataset({
+    ...     'hhmmssarsa': ('time', [123456, 235959]),
+    ...     'yyyymmddarsa': ('time', [230101, 231231])
+    ... })
+    >>> convert_time(data, 'arsa')
+    array(['2023-01-01T12:34:56', '2023-12-31T23:59:59'], dtype='datetime64[s]')
+    Notes
+    -----
+    There is a variable shadowing issue in the function: `mm` is first assigned
+    from the time variable ('hhmmss') but is then overwritten by the month value
+    from the date variable ('yyyymmdd'). As a result, the minutes in the output
+    datetime will always reflect the month value, not the actual minutes.
+    """
+
+
+    if not obs_type in ['arsa', 'iasi']:
+        raise ValueError("obs_type must be either 'arsa' or 'iasi'")
+        
+    var_name1 = "hhmmss" + obs_type
+
+    hhmmss = data[var_name1].values.astype(int)
+    hh = hhmmss // 10000
+    mm = (hhmmss % 10000) // 100
+    ss = hhmmss % 100
+
+
+    var_name2 = "yyyymmdd" + obs_type
+
+    yyyymmdd = data[var_name2].values.astype(int)
+    yyyy = yyyymmdd // 10000 +2000
+    mm = (yyyymmdd % 10000) // 100
+    dd = yyyymmdd % 100
+
+    # put them together to a datetime object
+    time = np.array(
+        [
+            np.datetime64(f"{y:04d}-{m:02d}-{d:02d}T{h:02d}:{mi:02d}:{s:02d}")
+            for y, m, d, h, mi, s in zip(yyyy, mm, dd, hh, mm, ss)
+        ]
+    )
+
+    return time
+
+
+# =============================================================================
+# %% atmospheric 
+# =============================================================================
+
+M_W, _ = molecular_mass("H2O")
+R_W = R / M_W
+
+
+def T_virtual(T,r_v):
+    """
+    Calculate the virtual temperature.
+    The virtual temperature is the temperature that dry air would need to have 
+    to match the density of a sample of moist air at the same pressure.
+    Parameters
+    ----------
+    T : float or array-like
+        Actual temperature [K].
+    r_v : float or array-like
+        Water vapor mixing ratio [kg/kg].
+    Returns
+    -------
+    Tv : float or array-like
+        Virtual temperature [K].
+    Notes
+    -----
+    The virtual temperature is calculated using the formula:
+        Tv = T * (1 + r_v / epsilon) / (1 + r_v)
+    where epsilon = R_D / R_W is the ratio of the gas constant for dry air (R_D) 
+    to the gas constant for water vapor (R_W), with typical values of 
+    R_D = 287.05 J/(kg·K) and R_W = 461.51 J/(kg·K), giving epsilon ≈ 0.622.
+    
+    """
+
+    
+    epsilon=R_D/R_W
+    
+    Tv=T*(1+r_v/epsilon)/(1+r_v)
+    
+    return Tv
+
+def mixingratio2vmr(r,Mx):
+    """
+    Convert mixing ratio to volume mixing ratio (VMR).
+    Parameters
+    ----------
+    r : float or array-like
+        Mixing ratio of the gas [kg/kg].
+    Mx : float
+        Molar mass of the gas [kg/mol].
+    Returns
+    -------
+    float or array-like
+        Volume mixing ratio (VMR) of the gas [mol/mol].
+    Notes
+    -----
+    The conversion uses the molar mass of dry air (M_d) defined as a global
+    constant in the module. The formula used is:
+        VMR = r / (r + Mx / Md)
+    where Md is the molar mass of dry air [kg/mol].
+    Examples
+    --------
+    >>> # Convert water vapor mixing ratio to VMR
+    >>> r = 0.01  # kg/kg
+    >>> Mx = 18.015  # g/mol (water vapor)
+    >>> vmr = mixingratio2vmr(r, Mx)
+    """
+   
+    Md=M_d
+    
+    return r/(r+Mx/Md)
+
+
+def get_altitude(p, T, r_v,z0=0):
+    """
+    Calculate altitude at each model level using the hypsometric equation.
+    This function integrates the hypsometric equation from the surface upwards
+    to compute the geometric height at each model level, accounting for water
+    vapor through the virtual temperature.
+    Parameters
+    ----------
+    p : np.ndarray
+        Pressure at each model level, shape (n_profiles, n_levels) [Pa].
+        The array is expected to start at the Top of Atmosphere (TOA).
+    T : np.ndarray
+        Temperature at each model level, shape (n_profiles, n_levels) [K].
+        The array is expected to start at the Top of Atmosphere (TOA).
+    r_v : np.ndarray
+        Water vapor mixing ratio at each model level,
+        shape (n_profiles, n_levels) [kg/kg].
+    z0 : float or np.ndarray, optional
+        Surface altitude (starting height for integration) [m].
+        Can be a scalar (applied to all profiles) or a 1D array of length
+        n_profiles (one value per profile). Default is 0.
+    Returns
+    -------
+    Z : np.ndarray
+        Altitude at each model level, shape (n_profiles, n_levels) [m].
+    Raises
+    ------
+    ValueError
+        If `z0` is an array and its length does not match the first dimension
+        of `p`.
+    Notes
+    -----
+    The altitude is computed using the hypsometric equation:
+        dz = (R_D / g) * T_v * d(ln(p))
+    where:
+        - R_D is the specific gas constant for dry air [J/(kg·K)]
+        - g is the gravitational acceleration [m/s²]
+        - T_v is the virtual temperature [K], accounting for water vapor
+        - d(ln(p)) is the natural log of the pressure ratio between adjacent levels
+    The integration starts at the surface (last index) and proceeds upward
+    toward the TOA (first index). For the topmost level (level == 1), the
+    pressure at the lower boundary is assumed to be 0.1 Pa.
+    Examples
+    --------
+    >>> import numpy as np
+    >>> p = np.array([[101325, 85000, 70000]])  # Pressure in Pa
+    >>> T = np.array([[288.15, 278.15, 268.15]])  # Temperature in K
+    >>> r_v = np.zeros_like(T)  # No water vapor
+    >>> Z = get_altitude(p, T, r_v, z0=0)
+    """
+       
+
+    if not np.isscalar(z0):
+        # check that z0 has the samme length as the first dim of p
+        if len(z0) != p.shape[0]:
+            raise ValueError("z0 must be a scalar or have the same length as the first dimension of p")
+
+    # allocate
+    Z = np.zeros_like(T)
+    
+    Z[:, -1] = z0
+
+    # model levels
+    # ml=atm_rawdata.model_level.to_numpy().astype('int')
+    ml = np.arange(0, np.size(T, 1)) + 1
+
+    z_h =Z[:,-1]
+
+    # here we need to invert the direction since the data is starting at TOA and we
+    # have to start the integration at the surface
+    for level in ml[::-1][1:]:
+
+        # compute virtual temperature
+        # t_level = T[:, level] * (1.0 + 0.609133 * Q[:, level])
+        t_level = T[:, level] * T_virtual(T[:, level], r_v[:,level])
+
+        # Calculate pressure differential for half and full level
+        if level == 1:
+            dlog_p = np.log(p[:,level] / 0.1)
+        else:
+            dlog_p = np.log(p[:,level] / p[:,level - 1])
+        
+        z_h = z_h + (t_level * dlog_p)*R_D/g
+
+        Z[:, level - 1] = z_h
+
+
+    return Z
