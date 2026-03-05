@@ -400,7 +400,7 @@ def get_altitude(p, T, r_v,z0=0):
 
         # compute virtual temperature
         # t_level = T[:, level] * (1.0 + 0.609133 * Q[:, level])
-        t_level = T[:, level] * T_virtual(T[:, level], r_v[:,level])
+        t_level = T_virtual(T[:, level], r_v[:,level])
 
         # Calculate pressure differential for half and full level
         if level == 1:
