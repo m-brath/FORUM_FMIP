@@ -14,6 +14,7 @@ import xarray as xr
 
 import matplotlib.pyplot as plt
 import pyarts3 as pa
+import frtmip_aux_functions as fax
 
 
 # =============================================================================
@@ -71,55 +72,38 @@ ws = pa.workspace.Workspace()
 kayser_grid = np.linspace(1, 2000, 200)  # in Kayser (cm^-1)
 ws.freq_grid = pa.arts.convert.kaycm2freq(kayser_grid)  # in Hz
 
-
-ws.atm_fieldInit(toa=100e3)
-
 index=111
-#Select for index all variables in the dataset
-variables=[var for var in atmdata.data_vars]
-
-lat=atmdata['lat'].values[index]
-lon=atmdata['lon'].values[index]
-
-atm={}
-for var in variables:
-    atm[var] = atmdata[var].isel(idx=index).values
-
-
-ds = xr.Dataset(
-    coords={
-        "alt": atm["alt"][::-1],
-        "lat": [lat],
-        "lon": [lon],
-    },
-)
-for var in variables:
-    
-    temp = atmdata[var].isel(idx=index).values
-    
-    if var != "alt":
-        temp = temp.reshape((len(temp), 1, 1))
-
-        ds[var] = xr.DataArray(
-            temp,
-            dims=["alt", "lat", "lon"],
-            coords={
-                "alt": atm["alt"],
-                "lat": [lat],
-                "lon": [lon],
-            },
-        )
-
-
+ds = fax.fmipdata2arts(atmdata, index)
 ws.atm_field=pa.data.to_atm_field(ds)
 
 
 
+#set up absorption species
+abs_species =[]
 
-#     if var == "T":
-#          ws.atm_field["t"]=atm["T"]
- 
+for spc in ds.data_vars:
     
+    if spc in ['p','t']:
+        continue
+
+    if spc == 'H2O':
+        abs_species.append('H2O')
+        abs_species.append('H2O-ForeignContCKDMT430')
+        abs_species.append('H2O-SelfContCKDMT430')
+    elif spc == 'CO2':
+        abs_species.append('CO2')
+        abs_species.append('CO2-CKDMT252')
+    elif spc == 'O2':
+        abs_species.append('O2')
+        abs_species.append('O2-CIAfunCKDMT100')
+    elif spc == 'N2':
+        abs_species.append('N2')
+        abs_species.append('N2-CIAfunCKDMT252')
+        abs_species.append('N2-CIArotCKDMT252')
+    elif spc in ['CFC11', 'CFC12']:
+        abs_species.append(spc+'-XFIT')
+
+
     
 # # Select absorption species and continuum model
 # # This example uses a reduced set of species to speed up the calculation.

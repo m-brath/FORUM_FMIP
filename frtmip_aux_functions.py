@@ -9,6 +9,7 @@ import re
 import numpy as np
 import periodictable as pt
 from scipy import constants as scc
+import xarray as xr
 
 
 
@@ -252,6 +253,82 @@ def convert_time(data, obs_type):
     )
 
     return time
+
+def fmipdata2arts(atmdata, index):
+    """
+    Convert FMIP atmospheric data to ARTS format for a specific index.
+    This function takes an atmospheric dataset and a specific index, then 
+    reformats the data into an xarray Dataset compatible with the ARTS 
+    (Atmospheric Radiative Transfer Simulator) format. The altitude array 
+    is reversed to ensure ascending order as required by ARTS.
+    Parameters
+    ----------
+    atmdata : xr.Dataset
+        Input atmospheric dataset containing multiple variables with dimensions
+        including 'idx', and coordinate variables 'lat', 'lon', and 'alt'.
+        All variables are expected to have an 'idx' dimension for selection.
+    index : int
+        The index along the 'idx' dimension to select from the dataset.
+    Returns
+    -------
+    xr.Dataset
+        A new xarray Dataset with:
+        - Coordinates: 'alt' (ascending), 'lat' (single value), 'lon' (single value)
+        - All non-coordinate variables reshaped to dimensions (alt, lat, lon)
+        - Altitude values reversed to ascending order compared to input
+    Notes
+    -----
+    - The altitude array is reversed (ascending order) as required by ARTS.
+    - Coordinate variables ('alt', 'lat', 'lon') are handled separately and 
+      not reshaped into 3D arrays.
+    - All other variables are reshaped to (n_alt, 1, 1) to include 
+      lat and lon dimensions.
+    Examples
+    --------
+    >>> arts_ds = fmipdata2arts(atmdata, index=0)
+    >>> print(arts_ds)
+    <xarray.Dataset>
+    Dimensions:  (alt: n, lat: 1, lon: 1)
+    Coordinates:
+      * alt      (alt) float64 ...
+      * lat      (lat) float64 ...
+      * lon      (lon) float64 ...
+    Data variables:
+        ...
+    """
+
+
+    #Select for index all variables in the dataset
+    variables=[var for var in atmdata.data_vars]
+
+    lat=atmdata['lat'].values[index]
+    lon=atmdata['lon'].values[index]
+    altitude=atmdata['alt'].values[index][::-1] # reverse the altitude array to have it in ascending order, which is required by ARTS
+    ds = xr.Dataset(
+        coords={
+            "alt": altitude,
+            "lat": [lat],
+            "lon": [lon],
+        },
+    )
+    for var in variables:
+    
+        temp = atmdata[var].isel(idx=index).values[::-1]
+        
+        if var != "alt" and var != "lat" and var != "lon":
+            temp = temp.reshape((len(temp), 1, 1))
+
+            ds[var] = xr.DataArray(
+                temp,
+                dims=["alt", "lat", "lon"],
+                coords={
+                    "alt": altitude,
+                    "lat": [lat],
+                    "lon": [lon],
+                },
+            )
+
+    return ds
 
 
 # =============================================================================
