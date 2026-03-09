@@ -62,7 +62,7 @@ species_mass = fax.get_species_masses(species_name)
 atmdata = {    
     'idx': np.arange(len(data['arsalat'])),
     'p': data['p [hPa]'].values*100,
-    'T': data['t [K]'].values,
+    't': data['t [K]'].values,
     'lat': data['arsalat'].values,
     'lon': data['arsalon'].values,    
     'time': fax.convert_time(data, 'arsa')
@@ -85,12 +85,13 @@ for i, spc in enumerate(data['28gas_label']):
     spc_name = fax.format_molecular_formula(spc_name)
     #Molecular mass of the species in kg mol^-1
     spc_molmass, _ = fax.molecular_mass(spc_name)
+    spc_temp=fax.format_species_list([spc_name])[0]
 
-    atmdata[spc_name] = fax.mixingratio2vmr(np.mean(data['28gas [kg_kg]'].values[:,i,:],0), spc_molmass)
+    atmdata[spc_temp] = fax.mixingratio2vmr(data['28gas [kg_kg]'].values[:,i,:], spc_molmass)
 
 
 r_v=data['h2o [kg_kg]'].values
-atmdata['alt'] = fax.get_altitude(atmdata['p'], atmdata['T'], r_v)
+atmdata['alt'] = fax.get_altitude(atmdata['p'], atmdata['t'], r_v)
 
 
 
