@@ -5,11 +5,13 @@ Created on Wed Feb 25 11:24:07 2026
 
 @author: u242031
 """
+import os
 import re
 import numpy as np
 import periodictable as pt
 from scipy import constants as scc
 import xarray as xr
+import pyarts3 as pa
 
 
 
@@ -254,6 +256,11 @@ def convert_time(data, obs_type):
 
     return time
 
+# =============================================================================
+# %% arts helpers
+# =============================================================================
+
+
 def fmipdata2arts(atmdata, index):
     """
     Convert FMIP atmospheric data to ARTS format for a specific index.
@@ -330,6 +337,44 @@ def fmipdata2arts(atmdata, index):
 
     return ds
 
+
+def get_species_per_type(cat_folder, type_name):
+
+    type_path=os.path.join(cat_folder, type_name)
+    type_files = os.listdir(type_path)
+    if type_name == 'predef' or type_name == 'cia':
+        type_files = [f.split('.')[0] for f in type_files if f.endswith('.xml')]
+    else:
+        type_files = [f.split('-')[0] for f in type_files if f.endswith('.xml')]
+
+    #remove duplicates
+    type_files = list(set(type_files))
+
+    return type_files
+
+def get_species(cat_folder):
+
+    abs_types=['lines','cia','predef','xsec']
+
+    species_list = {}
+
+    for abs_type in abs_types:
+        species = get_species_per_type(cat_folder, abs_type)
+        # print(f'{abs_type}: {species}')
+
+        species_list[abs_type] = species
+
+    return species_list
+
+def get_species_from_catalog():
+
+    #get species in the catatlog
+    cat_folder = pa.data.parameters.datapath
+    cat_folder = [str(folder) for folder in cat_folder if 'arts-cat-data' in str(folder)][0]
+
+    all_species = get_species(cat_folder)
+
+    return all_species
 
 # =============================================================================
 # %% atmospheric 

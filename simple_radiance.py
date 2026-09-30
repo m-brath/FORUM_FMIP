@@ -76,16 +76,16 @@ index=111
 ds = fax.fmipdata2arts(atmdata, index)
 ws.atm_field=pa.data.to_atm_field(ds)
 
+#now we want to go through the catalog and find out which species are available.
+all_species = fax.get_species_from_catalog()
 
-
-#set up absorption species
-abs_species =[]
-
+# set up absorption species
+abs_species = []
 for spc in ds.data_vars:
     
     if spc in ['p','t']:
         continue
-
+    
     if spc == 'H2O':
         abs_species.append('H2O')
         abs_species.append('H2O-ForeignContCKDMT430')
@@ -99,56 +99,60 @@ for spc in ds.data_vars:
     elif spc == 'N2':
         abs_species.append('N2')
         abs_species.append('N2-CIAfunCKDMT252')
-        abs_species.append('N2-CIArotCKDMT252')
-    elif spc in ['CFC11', 'CFC12']:
+        abs_species.append('N2-CIArotCKDMT252')    
+    elif spc in all_species['lines']:
+        abs_species.append(spc)
+    elif spc in all_species['xsec']:
         abs_species.append(spc+'-XFIT')
+        
+        
+ws.abs_speciesSet(species=abs_species)
 
 
-    
-# # Select absorption species and continuum model
-# # This example uses a reduced set of species to speed up the calculation.
-# # Use the second line for a more realistic setup.
-# ws.abs_speciesSet(
-#     species=["H2O-161", "H2O-ForeignContCKDMT400", "H2O-SelfContCKDMT400", "CO2-626"]
-# )
-# # ws.abs_speciesSet(
-# #     species=["H2O", "H2O-ForeignContCKDMT400", "H2O-SelfContCKDMT400", "CO2", "O3"]
-# # )
+# Read spectral line data from ARTS catalog
+ws.ReadCatalogData(ignore_missing=1)
 
-# # Read spectral line data from ARTS catalog
-# ws.ReadCatalogData()
-
-# # Apply a frequency cutoff. To be consistent with the CKD water vapor continuum,
-# # a cutoff of 25 Kayser is necessary. We set it here for all species, because it
-# # also speeds up the calculation.
-# cutoff = pa.arts.convert.kaycm2freq(25)
-# for band in ws.abs_bands:
-#     ws.abs_bands[band].cutoff = "ByLine"
-#     ws.abs_bands[band].cutoff_value = cutoff
+# Apply a frequency cutoff. To be consistent with the CKD water vapor continuum,
+# a cutoff of 25 Kayser is necessary. We set it here for all species, because it
+# also speeds up the calculation.
+cutoff = pa.arts.convert.kaycm2freq(25)
+for band in ws.abs_bands:
+    ws.abs_bands[band].cutoff = "ByLine"
+    ws.abs_bands[band].cutoff_value = cutoff
 
 # # Remove 90% of the lines to speed up the calculation
 # ws.abs_bands.keep_hitran_s(approximate_percentile=90)
 
 # # Automatically set up the methods to compute absorption coefficients
-# ws.spectral_propmat_agendaAuto()
+ws.spectral_propmat_agendaAuto(use_abs_lookup_data=0)
+
+# ws.abs_lookup_dataSimpleWide()
+# ws.atm_profileFromGrid()
+# ws.abs_lookup_dataCalc()
+
+
+# %%
+index=1000
+ds = fax.fmipdata2arts(atmdata, index)
+ws.atm_field=pa.data.to_atm_field(ds)
 
 # # Set up a simple atmosphere
-# ws.surf_fieldPlanet(option="Earth")
-# ws.surf_field[pa.arts.SurfaceKey("t")] = 295.0
+ws.surf_fieldPlanet(option="Earth")
+ws.surf_field[pa.arts.SurfaceKey("t")] = 295.0
 # ws.atm_fieldRead(
 #     toa=100e3, basename="planets/Earth/afgl/tropical/", missing_is_zero=1
 # )
+# ws.spectral_rad_surface_agendaSet(option="SurfaceReflectance")
 
-
-# ws.ray_pathGeometric(pos=pos, los=los, max_stepsize=1000.0)
-# ws.spectral_radClearskyEmission()
+ws.ray_pathGeometric(pos=pos, los=los, max_stepsize=1000.0)
+ws.spectral_radClearskyEmission()
 
 # # %% Show results
 
-# fig, ax = pa.plot(ws.spectral_rad, freqs=kayser_grid, component="I")
-# ax.set_xlabel("Frequency / Kayser (cm$^{-1}$)")
-# ax.set_ylabel("Spectral radiance /")
-# ax.set_title("Clear sky outgoing radiance")
+fig, ax = pa.plot(ws.spectral_rad, freqs=kayser_grid, component="I")
+ax.set_xlabel("Frequency / Kayser (cm$^{-1}$)")
+ax.set_ylabel("Spectral radiance /")
+ax.set_title("Clear sky outgoing radiance")
 
 # if "ARTS_HEADLESS" not in os.environ:
 #     plt.show()
