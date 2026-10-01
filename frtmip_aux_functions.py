@@ -10,6 +10,7 @@ import re
 import numpy as np
 import periodictable as pt
 from scipy import constants as scc
+from scipy.interpolate import make_interp_spline
 import xarray as xr
 import pyarts3 as pa
 
@@ -448,6 +449,31 @@ def mixingratio2vmr(r,Mx):
     return r/(r+Mx/Md)
 
 
+def vmr2mixingratio(vmr, Mx):
+    """
+    Convert volume mixing ratio (VMR) to mixing ratio. Inverse of
+    :func:`mixingratio2vmr`.
+    Parameters
+    ----------
+    vmr : float or array-like
+        Volume mixing ratio of the gas [mol/mol].
+    Mx : float
+        Molar mass of the gas, in the same units as M_d [kg/mol].
+    Returns
+    -------
+    float or array-like
+        Mixing ratio of the gas [kg/kg].
+    Notes
+    -----
+    Inverting VMR = r / (r + Mx / Md) gives
+        r = vmr * Mx / (Md * (1 - vmr))
+    """
+
+    Md = M_d
+
+    return vmr * Mx / (Md * (1.0 - vmr))
+
+
 def get_altitude(p, T, r_v,z0=0):
     """
     Calculate altitude at each model level using the hypsometric equation.
@@ -536,3 +562,164 @@ def get_altitude(p, T, r_v,z0=0):
 
 
     return Z
+
+
+def refine_pgrid(p, refinement_steps=3, points_added_per_step=2):
+    """
+    Refine a 1-D pressure grid by inserting interpolated points.
+
+    The grid is refined `refinement_steps` times; at every step
+    `points_added_per_step` points are inserted between each pair of
+    neighbouring grid points in log10 space, so that adjacent new levels
+    are equally spaced in log pressure. Same construction as
+    opacity_rule/scripts/opacity_helper_function.refine_pgrid.
+
+    Parameters
+    ----------
+    p : np.ndarray
+        1D monotonically ordered pressure grid [Pa]. Order (ascending or
+        descending) is preserved.
+    refinement_steps : int, optional
+        Number of refinement passes (default: 3).
+    points_added_per_step : int, optional
+        Number of points inserted between each pair of current grid points
+        at every pass (default: 2).
+
+    Returns
+    -------
+    np.ndarray
+        1D refined pressure grid. Has the same start and end points as the
+        input, same order. Total grid points after refinement:
+        n_final = (n_initial - 1) * (points_added_per_step + 1) **
+        refinement_steps + 1, so keep the factors small.
+    Examples
+    --------
+    >>> p = np.array([101325., 70000., 10000.])
+    >>> p_ref = refine_pgrid(p, refinement_steps=1, points_added_per_step=3)
+    >>> p_ref[0] == p[0] and p_ref[-1] == p[-1]
+    True
+    """
+
+    log_p = np.log10(p)
+
+    for _ in range(refinement_steps):
+        n = len(log_p)
+        new_log_p = np.zeros((n - 1) * (points_added_per_step + 1) + 1)
+        new_log_p[0] = log_p[0]
+        idx = 1
+        for j in range(n - 1):
+            span = log_p[j:j + 2]
+            for k in range(1, points_added_per_step + 1):
+                new_log_p[idx] = span[0] + (span[1] - span[0]) \
+                    * k / (points_added_per_step + 1)
+                idx += 1
+            new_log_p[idx] = span[1]
+            idx += 1
+
+        log_p = new_log_p
+
+    # pin the endpoints to the exact input values (the log10/10** round trip
+    # is not exact in floating point)
+    out = np.power(10, log_p)
+    out[0] = p[0]
+    out[-1] = p[-1]
+    return out
+
+
+def refine_profile(p_prof, t_prof, spc_profiles, z0=0.0,
+                   refinement_steps=3, points_added_per_step=2):
+    """
+    Interpolate / subdivide a single atmospheric profile onto a refined
+    pressure grid.
+
+    Mirrors the refinement used in
+    opacity_rule/scripts/realistic_atmosphere_plots.py:
+    - the pressure grid is refined in log10 space (:func:`refine_pgrid`),
+    - temperature and all species VMRs are interpolated with a cubic spline
+      in log10(p) space,
+    - the altitude profile is recomputed on the new grid from the
+      hypsometric equation via :func:`get_altitude` (with the virtual
+      temperature, i.e. the refined H2O mixing ratio if present).
+
+    Parameters
+    ----------
+    p_prof : np.ndarray
+        Pressure profile [Pa], 1D, surface-first (descending).
+    t_prof : np.ndarray
+        Temperature profile [K], 1D, same length as p_prof.
+    spc_profiles : dict of np.ndarray
+        {species: VMR profile [1]}, each 1D, same length as p_prof.
+        If an 'H2O' entry is present, its VMR is used for the virtual
+        temperature in :func:`get_altitude`.
+    z0 : float, optional
+        Surface altitude (starting height for the hypsometric integration)
+        [m]. Default is 0.
+    refinement_steps : int, optional
+        Number of refinement passes, passed to :func:`refine_pgrid`
+        (default: 3).
+    points_added_per_step : int, optional
+        Number of points inserted between each pair of current grid points
+        at every pass, passed to :func:`refine_pgrid` (default: 2).
+
+    Returns
+    -------
+    p_new : np.ndarray
+        Refined pressure grid [Pa], descending.
+    t_new : np.ndarray
+        Temperature on the refined grid [K].
+    spc_new : dict of np.ndarray
+        {species: refined VMR profile}, may contain tiny negative values
+        from spline overshoot (clip them before use, e.g. in
+        make_gridded_field).
+    z_new : np.ndarray
+        Altitude on the refined grid [m], computed from the hypsometric
+        equation.
+    Examples
+    --------
+    >>> import numpy as np
+    >>> p = np.array([101325., 70000., 10000.])
+    >>> t = np.array([285., 260., 230.])
+    >>> p_new, t_new, spc_new, z_new = refine_profile(
+    ...     p, t, {'CO2': np.full(3, 4e-4)}, z0=0.0)
+    >>> len(p_new) > len(p)
+    True
+    """
+
+    p_prof = np.asarray(p_prof, dtype=float)
+    t_prof = np.asarray(t_prof, dtype=float)
+
+    if refinement_steps <= 0:
+        raise ValueError("refinement_steps must be a positive integer")
+
+    p_new = refine_pgrid(p_prof, refinement_steps, points_added_per_step)
+
+    # interpolate in log10(p) space. make_interp_spline needs increasing x,
+    # hence the ascending view (reversed surface-first = TOA-first) and the
+    # flip of the result back to surface-first order.
+    log_p = np.log10(p_prof)[::-1]
+    log_p_new = np.log10(p_new)[::-1]
+
+    t_new = np.array(make_interp_spline(log_p, t_prof[::-1], k=3)(log_p_new))[::-1]
+
+    spc_new = {}
+    for spc, prof in spc_profiles.items():
+        spc_new[spc] = np.array(
+            make_interp_spline(log_p, np.asarray(prof, dtype=float)[::-1], k=3)
+            (log_p_new)
+        )[::-1]
+
+    # altitude from the hypsometric equation on the refined grid.
+    # get_altitude expects TOA-first order (surface at the last index) and
+    # starts the integration at the surface with height z0, hence the flips.
+    if 'H2O' in spc_new:
+        M_W, _ = molecular_mass('H2O')
+        r_v = vmr2mixingratio(spc_new['H2O'], M_W)
+    else:
+        r_v = np.zeros_like(t_new)
+
+    Z = get_altitude(
+        p_new[::-1][None, :], t_new[::-1][None, :], r_v[::-1][None, :],
+        z0=z0
+    )
+
+    return p_new, t_new, spc_new, Z[0][::-1]
