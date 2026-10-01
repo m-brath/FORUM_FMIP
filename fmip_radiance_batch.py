@@ -21,9 +21,10 @@ Input data: the same files as used by fmip_lw_benchmark_batch.py
 
 Result of interest
 ------------------
-The top-of-atmosphere (TOA) spectral radiance field, i.e. the DISORT
-``dobatch_cloudbox_field`` at the highest model level, for every column:
-    spectral_radiance_TOA  (frequency, idx, zenith, azimuth)
+The top-of-atmosphere (TOA) spectral radiance at zenith angle 180 degrees,
+plus the minimum and maximum altitude of every column:
+    spectral_radiance_TOA  (frequency, idx)
+    altitude_min, altitude_max  (idx)
 
 Notes
 -----
@@ -364,37 +365,44 @@ def main():
             pressure[i] = results["array_of_pressure"][i]
             altitude[i] = results["array_of_altitude"][i]
 
-        # TOA slice: highest model level (last index, since surface-first)
-        toa_rad = field[:, :, -1, :, :]               # (idx, N_wvn, N_za, N_aa)
+        # TOA slice: highest model level (last index, since surface-first).
+        # Keep only the radiance at zenith angle 180 degrees.
+        za_index = int(np.argmin(np.abs(za_grid - 180.0)))
+        if not np.isclose(za_grid[za_index], 180.0):
+            raise AssertionError(
+                f"zenith angle grid does not contain 180 degrees: {za_grid}"
+            )
+        toa_rad = field[:, :, -1, za_index, 0]       # (idx, N_wvn)
 
         # quick sanity check for the first profile of the chunk
-        r0 = field[0, :, -1, :, 0]
+        r0 = toa_rad[0]
         print(f"  TOA spectral radiance (profile {col_ids[c0]}): "
               f"shape {r0.shape}, min {r0.min():.3e}, max {r0.max():.3e}")
-        print(f"  zenith angle grid (sim): {za_grid}")
-        print(f"  azimuth angle grid (sim): {aa_grid}\n")
+        print(f"  selected zenith angle: {za_grid[za_index]} degrees\n")
 
         # ---------------------------------------------------------------------
         # export the chunk results
         # ---------------------------------------------------------------------
         ds = xr.Dataset(
             {
-                # transpose to the conventional (frequency, idx, zenith, azim)
+                # transpose to the conventional (frequency, idx) layout
                 "spectral_radiance_TOA":
-                    (["frequency", "idx", "zenith", "azimuth"],
-                     toa_rad.transpose(1, 0, 2, 3),
+                    (["frequency", "idx"],
+                     toa_rad.transpose(1, 0),
                      {"units": "W m^-2 Hz^-1 sr^-1 "
-                               "(ARTS/DISORT spectral radiance)"}),
-                "altitude": (["idx", "lev"], altitude, {"units": "m"}),
-                "pressure": (["idx", "lev"], pressure, {"units": "Pa"}),
+                               "(ARTS/DISORT spectral radiance)",
+                      "zenith_angle": float(za_grid[za_index])}),
+                "altitude_min": (["idx"], altitude.min(axis=1),
+                                  {"units": "m"}),
+                "altitude_max": (["idx"], altitude.max(axis=1),
+                                  {"units": "m"}),
             },
             coords={
                 "idx": np.array(col_ids[c0:c1], dtype=np.int64),
-                "lev": np.arange(n_lev),
                 "frequency": (["frequency"], f_out, {"units": "Hz"}),
-                # angular grids as returned by the simulator (in degrees)
-                "zenith": (["zenith"], za_grid, {"units": "deg"}),
-                "azimuth": (["azimuth"], aa_grid, {"units": "deg"}),
+                "wavenumber": (["frequency"],
+                                arts.convert.freq2kaycm(f_out),
+                                {"units": "cm^-1"}),
             },
         )
 
