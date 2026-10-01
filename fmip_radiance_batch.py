@@ -48,10 +48,15 @@ Notes
   radiance_simulator_batch calls on one instance are not supported by this
   ARTS workspace (e.g. NumericCreate("DummyVariable") in the batch method
   fails on already existing variables).
-* LUT cache: default location, i.e. <cwd>/cache/<setup_name>/ with a NEW
-  setup_name (fmip_radiance_batch), so nothing is shared with the fmip_batch
-  (flux) cache and it is built from scratch. Delete the cache folder manually
-  to force a rebuild if the spectrum or species setup is changed.
+* LUT: the batch LUT is calculated up front, before the per-chunk
+  simulations, from ALL atmospheres of the input file (independent of the
+  column subset / chunks) via get_lookuptableBatch, so its temperature /
+  pressure / VMR state ranges are wide enough for any selection. Later chunk
+  instances only read the stored LUT (set recalc_lut=True in the edit section
+  to force a rebuild). Cache location: <cwd>/cache/<setup_name>/ (default;
+  same for the presimulation and every chunk instance, because the whole
+  batch shares setup_name = fmip_radiance_batch). Delete the cache folder
+  manually to force a rebuild if the spectrum or species setup is changed.
 * Radiance units: the stored radiance is the raw ARTS/DISORT spectral
   radiance (W m^-2 Hz^-1 sr^-1). Confirm against a first run and adjust the
   NetCDF attribute if your convention differs.
@@ -110,6 +115,15 @@ chunk_size = 20      # number of columns per radiance_simulator_batch call
 export_results = True
 export_full_field = False   # also store the full (frequency, idx, lev, zenith,
                             # azimuth) cube, not just the TOA slice
+
+# If True, FORCE recalculation of the batch LUT before the simulations
+# (i.e. overwrite any stored LUT in the cache folder even if it exists).
+# If False, the stored LUT is used when one exists; a LUT is only calculated
+# from scratch if the cache does not contain one yet. Because the LUT is
+# calculated up front from ALL input atmospheres (see below), a stored LUT
+# is always wide enough. Delete <cwd>/cache/<setup_name>/ manually if the
+# spectrum or species setup has changed.
+recalc_lut = False
 
 # FluxSimulator setup name.
 # A NEW setup name -> its own LUT cache dir <cwd>/cache/<setup_name>/ is
@@ -226,22 +240,25 @@ def main():
         spc for spc in atmdata.data_vars if spc not in ("p", "t", "alt")
     ]
 
-    # load the column subset (files are TOA-first -> flip to surface-first)
-    p_subset = atmdata["p"].isel(idx=slice(start_column, end_column)).values
-    t_subset = atmdata["t"].isel(idx=slice(start_column, end_column)).values
-    z_subset = atmdata["alt"].isel(idx=slice(start_column, end_column)).values
-    spc_subset = {
-        spc: atmdata[spc].isel(idx=slice(start_column, end_column)).values
+    # load all profiles from the file (files are TOA-first -> flip to
+    # surface-first). The LUT is calculated from EVERY column of the file
+    # (independent of the subset run below), so all of them are needed.
+    p_data = atmdata["p"].values            # (n_total, n_lev)
+    t_data = atmdata["t"].values
+    z_data = atmdata["alt"].values
+    spc_data = {
+        spc: atmdata[spc].values
         for spc in species_list_of_data
     }
 
     # sfcdata fields are 1-D coordinate arrays (no shared 'idx' dim),
     # hence positional indexing
-    T_surface_sub = sfcdata["temperature"].values[start_column:end_column]
-    lat_sub = sfcdata["lat"].values[start_column:end_column]
-    lon_sub = sfcdata["lon"].values[start_column:end_column]
+    T_sfc_file = sfcdata["temperature"].values
+    lat_file = sfcdata["lat"].values
+    lon_file = sfcdata["lon"].values
 
     wvn_em = emissivity["wvn"].values
+    # emissivities are only needed for the simulated subset
     eps_subset = emissivity["emissivity"].isel(
         idx=slice(start_column, end_column)).values
 
@@ -260,10 +277,56 @@ def main():
     print(f"  species     : {len(species_list_of_data)} in the data")
     print(f"  setup name  : {setup_name}")
     print(f"  LUT cache   : {os.path.join(os.getcwd(), 'cache', setup_name)}")
+    print(f"  recalc LUT  : {recalc_lut}")
     print("=" * 70)
 
     if export_results:
         results_folder.mkdir(parents=True, exist_ok=True)
+
+    # ==========================================================================
+    # %% atmospheres for ALL columns of the input file (surface-first)
+    # ==========================================================================
+    # All profiles of the file are built once up front so the batch LUT can
+    # be calculated from the full set of atmospheres (independent of the
+    # start_column / n_columns subset run below).
+    all_atms = []
+    T_surfs_all = []
+    geo_positions_all = []
+    for j in range(n_total):
+        all_atms.append(make_gridded_field(
+            p_data[j][::-1],
+            t_data[j][::-1],
+            z_data[j][::-1],
+            {spc: spc_data[spc][j][::-1]
+             for spc in species_list_of_data},
+            species_list_of_data,
+        ))
+        T_surfs_all.append(float(T_sfc_file[j]))
+        geo_positions_all.append([float(lat_file[j]), float(lon_file[j])])
+
+    # ==========================================================================
+    # %% LUT setup up front, from ALL atmospheres of the input file
+    # ==========================================================================
+    # Calculate (or read) the batch LUT before any simulation runs. Passing
+    # EVERY atmosphere in the input file (not only the column subset that is
+    # simulated below) guarantees the LUT state ranges (temperature, pressure,
+    # mixing ratios) cover any possible chunk/selection. recalc_lut (edit
+    # section) forces a rebuild of any stored LUT.
+    t_lut = time.time()
+    Flxsim_lut = fsm.FluxSimulator(setup_name)
+    Flxsim_lut.set_frequency_grid(f_grid)
+
+    # data species added to the FluxSimulator defaults
+    # (H2O + MT-CKD 4.3 continuums, O2/N2 CIA, CO2-CKDMT252, O3, O3-XFIT),
+    # mirroring the LW part of rte_benchmarks_batch.py
+    abs_species = define_abs_species(Flxsim_lut, species_list_of_data)
+    Flxsim_lut.add_species(abs_species, verbose=True)
+
+    Flxsim_lut.emission = 1
+    Flxsim_lut.gas_scattering = False
+
+    Flxsim_lut.get_lookuptableBatch(all_atms, recalc=recalc_lut)
+    print(f"  LUT ready in {time.time() - t_lut:.1f} s\n")
 
     # ==========================================================================
     # %% simulation, chunk by chunk
@@ -277,21 +340,11 @@ def main():
               f"columns {col_ids[c0]} .. {col_ids[c1 - 1]} ({c1 - c0} columns)")
         print("=" * 70)
 
-        # build the compact atmospheres (surface-first)
-        atms = []
-        T_surfs = []
-        geo_positions = []
-        for j in range(c0, c1):
-            atms.append(make_gridded_field(
-                p_subset[j][::-1],
-                t_subset[j][::-1],
-                z_subset[j][::-1],
-                {spc: spc_subset[spc][j][::-1]
-                 for spc in species_list_of_data},
-                species_list_of_data,
-            ))
-            T_surfs.append(float(T_surface_sub[j]))
-            geo_positions.append([float(lat_sub[j]), float(lon_sub[j])])
+        # chunk views of the up-front built full-file arrays (shifted by
+        # start_column, since the lists cover ALL columns of the input file)
+        atms = all_atms[c0 + start_column:c1 + start_column]
+        T_surfs = T_surfs_all[c0 + start_column:c1 + start_column]
+        geo_positions = geo_positions_all[c0 + start_column:c1 + start_column]
 
         # surface altitudes from the (surface-first) compact atmospheres
         surface_altitudes = [atm[1, 0, 0, 0] for atm in atms]
@@ -319,7 +372,11 @@ def main():
         Flxsim.emission = 1
         Flxsim.gas_scattering = False
 
-        # the simulation (radiance batch derives nstreams from N_za internally)
+        # the simulation (radiance batch derives nstreams from N_za internally).
+        # recalc=False is passed through to the internal get_lookuptableBatch
+        # call, which then just reads the LUT that was set up up front from
+        # ALL atmospheres; the recalc fallback only triggers if the stored
+        # LUT is missing or unfit.
         results = Flxsim.radiance_simulator_batch(
             atms,
             T_surfs,
@@ -330,6 +387,7 @@ def main():
             N_za=N_za,
             N_aa=N_aa,
             end_index=-1,
+            recalc=False,
         )
         print(f"  chunk simulation done in {time.time() - t_chunk:.1f} s\n")
 
