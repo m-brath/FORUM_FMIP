@@ -72,6 +72,8 @@ from pyarts import arts
 
 import FluxSimulator as fsm
 
+import frtmip_aux_functions as fax
+
 
 # =============================================================================
 # %% paths / constants  (edit here)
@@ -124,6 +126,17 @@ export_full_field = False   # also store the full (frequency, idx, lev, zenith,
 # is always wide enough. Delete <cwd>/cache/<setup_name>/ manually if the
 # spectrum or species setup has changed.
 recalc_lut = False
+
+# -----------------------------------------------------------------------------
+# profile refinement: subdivide/interpolate the vertical grid (log10-p space)
+# T and species VMR via cubic spline, z recomputed from the hypsometric
+# equation (see frtmip_aux_functions.refine_profile), same scheme as
+# opacity_rule/scripts/realistic_atmosphere_plots.py.
+# -----------------------------------------------------------------------------
+refine = False              # master switch for profile refinement
+refinement_steps = 1        # number of refinement passes
+points_added_per_step = 3   # points inserted per interval / pass
+                            # (43 levels -> (43-1)*(2+1)**3+1 = 1135 levels)
 
 # FluxSimulator setup name.
 # A NEW setup name -> its own LUT cache dir <cwd>/cache/<setup_name>/ is
@@ -208,6 +221,51 @@ def make_reflectivities(eps_profiles, wvn_em):
     return refls
 
 
+def refine_all_profiles(p_data, t_data, z_data, spc_data,
+                        refinement_steps, points_added_per_step):
+    """
+    Refine / interpolate every column of the TOA-first input arrays onto a
+    refined log10-pressure grid, via frtmip_aux_functions.refine_profile.
+
+    All input and output arrays keep the (n_total, n_lev) TOA-first layout,
+    so the downstream make_gridded_field (which flips to surface-first) is
+    unchanged. The level count is identical for every column; for the
+    original n_lev it is
+        n_new = (n_lev - 1) * (points_added_per_step + 1) **
+        refinement_steps + 1
+    """
+    n_total, n_lev = p_data.shape
+
+    # same number of levels for every column once refined
+    n_new = (n_lev - 1) * (points_added_per_step + 1) ** refinement_steps + 1
+    new_p = np.zeros((n_total, n_new))
+    new_t = np.zeros((n_total, n_new))
+    new_z = np.zeros((n_total, n_new))
+    new_spc = {spc: np.zeros((n_total, n_new)) for spc in spc_data}
+
+    for j in range(n_total):
+        # z0 is the original surface altitude (last entry, TOA-first)
+        z0 = float(z_data[j, -1])
+
+        p_prof, t_prof, spc_prof, z_prof = fax.refine_profile(
+            p_data[j][::-1],
+            t_data[j][::-1],
+            {spc: spc_data[spc][j][::-1] for spc in spc_data},
+            z0=z0,
+            refinement_steps=refinement_steps,
+            points_added_per_step=points_added_per_step,
+        )
+
+        # flip back to the TOA-first layout used by the rest of the script
+        new_p[j] = p_prof[::-1]
+        new_t[j] = t_prof[::-1]
+        new_z[j] = z_prof[::-1]
+        for spc in spc_data:
+            new_spc[spc][j] = spc_prof[spc][::-1]
+
+    return new_p, new_t, new_z, new_spc, n_new
+
+
 # =============================================================================
 # %% main
 # =============================================================================
@@ -251,6 +309,20 @@ def main():
         for spc in species_list_of_data
     }
 
+    # -------------------------------------------------------------------------
+    # optional: refine / interpolate the vertical grid of every column
+    # -------------------------------------------------------------------------
+    if refine:
+        n_orig = n_lev
+        p_data, t_data, z_data, spc_data, n_lev = refine_all_profiles(
+            p_data, t_data, z_data, spc_data,
+            refinement_steps, points_added_per_step
+        )
+        print(f"  profile refinement: "
+              f"{n_orig} -> {n_lev} levels "
+              f"(steps={refinement_steps}, "
+              f"points_added_per_step={points_added_per_step})")
+
     # sfcdata fields are 1-D coordinate arrays (no shared 'idx' dim),
     # hence positional indexing
     T_sfc_file = sfcdata["temperature"].values
@@ -271,7 +343,9 @@ def main():
           f"N_wvn = {N_wvn}")
     print(f"  columns     : {col_ids[0]} .. {col_ids[-1]} "
           f"({n_to_run} columns, {n_chunks} chunk(s) of <= {chunk_size})")
-    print(f"  levels      : {n_lev}")
+    print(f"  levels      : {n_lev}"
+          + (f" (refined, {refinement_steps}/{points_added_per_step})"
+             if refine else ""))
     print(f"  angular     : N_za = {N_za}, N_aa = {N_aa}")
     print(f"  emission    : longwave/thermal, no sun, gas_scattering = False")
     print(f"  species     : {len(species_list_of_data)} in the data")
