@@ -86,19 +86,18 @@ data_dir = script_dir.parent / "data"
 atmdata_file = data_dir / "atmdata.nc"
 sfcdata_file = data_dir / "sfcdata.nc"
 surface_emissivity_file = data_dir / "surface_emissivity.nc"
+satdata_file = data_dir / "satdata.nc"
+sensor_response_file = data_dir / "sensor_response.nc"
 
 # results folder
 results_folder = script_dir.parent / "results" / "RADIANCE"
 
 # -----------------------------------------------------------------------------
-# longwave (wavenumber) grid, in cm^-1 (matches the surface_emissivity grid)
-# (same spectrum as fmip_lw_benchmark_batch.py)
+# longwave (wavenumber) grid size, shared by every profile of the batch
 # -----------------------------------------------------------------------------
-wvn_min = 645.0      # cm^-1
-wvn_max = 2760.0     # cm^-1
-N_wvn = 100          # number of wavenumbers (changeable later)
-wvn_grid = np.linspace(wvn_min, wvn_max, N_wvn)
-f_grid = arts.convert.kaycm2freq(wvn_grid)   # Hz
+
+N_wvn = 200          # number of wavenumbers (changeable later)
+include_sensor_response = True  # whether to include the sensor response in the simulation
 
 # -----------------------------------------------------------------------------
 # angular grid, shared by every profile of the batch
@@ -148,14 +147,65 @@ setup_name = "fmip_radiance_batch"
 # %% helpers
 # =============================================================================
 
+def define_frequency_grid(N_wvn, include_sensor_response=False):
+    """
+    Build the uniform simulation grid covering the satellite spectral range.
+
+    The range is [min, max] of the "wvn" variable in satdata_file. If
+    include_sensor_response is True, the range is extended using the
+    "wavenumber" axis of sensor_response_file (min lowered by its minimum,
+    max raised by its maximum).
+
+    Parameters
+    ----------
+    N_wvn : int
+        Number of equidistant wavenumber points.
+    include_sensor_response : bool
+        Extend the range by the sensor response wavenumber axis.
+
+    Returns
+    -------
+    f_grid : ndarray, shape (N_wvn,)
+        Frequency grid in Hz.
+    wvn_grid : ndarray, shape (N_wvn,)
+        Wavenumber grid in cm^-1.
+    """
+    wvn_sat= xr.open_dataset(satdata_file)["wvn"].values
+    wvn_min = wvn_sat.min()
+    wvn_max = wvn_sat.max()
+
+    if include_sensor_response:
+        srf = xr.open_dataset(sensor_response_file)
+        wvn_grid = srf["wvn"].values
+
+        wvn_min += wvn_grid.min()
+        wvn_max += wvn_grid.max()
+
+    wvn_grid = np.linspace(wvn_min, wvn_max, N_wvn)
+    f_grid = arts.convert.kaycm2freq(wvn_grid)   # Hz
+    return f_grid, wvn_grid
+
 def define_abs_species(Flxsim, species_list_of_data):
     """
     Analog of rte_aux_functions.define_abs_species.
 
     For every species present in the atmospheric data, return the absorption
     species to pass to FluxSimulator.add_species: the plain name if it is a
-    line species, the name + "-XFIT" if it is a cross-section species.
+    line species, the name + "-XFIT" if it is a cross-section species (both
+    entries are returned if the species is in both catalogs).
     Species not found in the catalog are skipped with a warning.
+
+    Parameters
+    ----------
+    Flxsim : FluxSimulator
+        Instance providing line_species_available / xsec_species_available.
+    species_list_of_data : list of str
+        Species names present in the atmospheric data.
+
+    Returns
+    -------
+    list of str
+        Absorption species for FluxSimulator.add_species.
     """
     abs_species = []
     for spc in species_list_of_data:
@@ -179,6 +229,25 @@ def make_gridded_field(p_prof, t_prof, z_prof, spc_profiles, species_list):
 
     All profiles must be in surface-first order (pressure decreasing, i.e.
     reversed w.r.t. the input files, which are TOA-first).
+
+    Parameters
+    ----------
+    p_prof : ndarray, shape (n_lev,)
+        Pressure in Pa (becomes the pressure grid).
+    t_prof : ndarray, shape (n_lev,)
+        Temperature in K.
+    z_prof : ndarray, shape (n_lev,)
+        Altitude in m.
+    spc_profiles : dict of str -> ndarray, shape (n_lev,)
+        Volume mixing ratio profile per species.
+    species_list : list of str
+        Species to include, in the order stored in the field.
+
+    Returns
+    -------
+    arts.GriddedField4
+        Data layout (T, z, species...) x n_lev x 1 x 1; negative mixing
+        ratios are clipped to zero.
     """
     atm_field = arts.GriddedField4()
 
@@ -204,15 +273,28 @@ def make_gridded_field(p_prof, t_prof, z_prof, spc_profiles, species_list):
     return atm_field
 
 
-def make_reflectivities(eps_profiles, wvn_em):
+def make_reflectivities(eps_profiles, wvn_em, wvn_grid):
     """
     Surface reflectivity vectors for a set of columns.
 
     Per column the spectral emissivity is interpolated from the emissivity
     file wavenumber grid onto the simulation wavenumber grid, and the
-    reflectivity is 1 - emissivity (one value per frequency of f_grid).
+    reflectivity is 1 - emissivity (one value per frequency of f_grid),
+    clipped to [0, 1].
 
-    Returns a list of (N_wvn,) vectors, one per column.
+    Parameters
+    ----------
+    eps_profiles : ndarray, shape (n_columns, n_wvn_em)
+        Spectral emissivity per column on the emissivity-file grid.
+    wvn_em : ndarray, shape (n_wvn_em,)
+        Wavenumber grid of the emissivity file in cm^-1 (increasing).
+    wvn_grid : ndarray, shape (N_wvn,)
+        Simulation wavenumber grid in cm^-1.
+
+    Returns
+    -------
+    list of ndarray
+        One (N_wvn,) reflectivity vector per column.
     """
     refls = []
     for j in range(eps_profiles.shape[0]):
@@ -233,6 +315,24 @@ def refine_all_profiles(p_data, t_data, z_data, spc_data,
     original n_lev it is
         n_new = (n_lev - 1) * (points_added_per_step + 1) **
         refinement_steps + 1
+
+    Parameters
+    ----------
+    p_data, t_data, z_data : ndarray, shape (n_total, n_lev)
+        Pressure (Pa), temperature (K) and altitude (m), TOA-first.
+    spc_data : dict of str -> ndarray, shape (n_total, n_lev)
+        Volume mixing ratios per species, TOA-first.
+    refinement_steps : int
+        Number of refinement passes.
+    points_added_per_step : int
+        Points inserted per interval and pass.
+
+    Returns
+    -------
+    new_p, new_t, new_z : ndarray, shape (n_total, n_new)
+    new_spc : dict of str -> ndarray, shape (n_total, n_new)
+    n_new : int
+        Refined number of levels.
     """
     n_total, n_lev = p_data.shape
 
@@ -279,6 +379,8 @@ def main():
     atmdata = xr.open_dataset(atmdata_file)
     sfcdata = xr.open_dataset(sfcdata_file)
     emissivity = xr.open_dataset(surface_emissivity_file)
+
+    f_grid, wvn_grid = define_frequency_grid(N_wvn, include_sensor_response=True)
 
     n_total = int(atmdata.sizes["idx"])
     n_lev = int(atmdata.sizes["lev"])
@@ -339,7 +441,7 @@ def main():
     # -------------------------------------------------------------------------
     print("=" * 70)
     print("FMIP batch spectral-radiance (TOA) benchmark")
-    print(f"  spectrum    : {wvn_min:.0f} - {wvn_max:.0f} cm^-1, "
+    print(f"  spectrum    : {wvn_grid.min():.0f} - {wvn_grid.max():.0f} cm^-1, "
           f"N_wvn = {N_wvn}")
     print(f"  columns     : {col_ids[0]} .. {col_ids[-1]} "
           f"({n_to_run} columns, {n_chunks} chunk(s) of <= {chunk_size})")
@@ -425,7 +527,7 @@ def main():
 
         # per-column surface reflectivity vectors (1 - eps), length == f_grid
         reflectivities = make_reflectivities(
-            eps_subset[c0:c1], wvn_em)
+            eps_subset[c0:c1], wvn_em, wvn_grid)
 
         # no sun for longwave
         sun_positions = [[] for _ in atms]
@@ -551,7 +653,7 @@ def main():
         if export_results:
             fname = (
                 f"Reference_radiance_TOA_Nf{N_wvn}"
-                f"_Nza{N_za}_Naa{N_aa}"
+                f"_Nza{N_za}_{setup_name}"
             )
             if n_chunks > 1:
                 fname += f"_chunk{ck:03d}"
