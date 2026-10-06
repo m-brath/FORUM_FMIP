@@ -97,7 +97,8 @@ results_folder = script_dir.parent / "results" / "RADIANCE"
 # -----------------------------------------------------------------------------
 
 N_wvn = 200          # number of wavenumbers (changeable later)
-include_sensor_response = True  # whether to include the sensor response in the simulation
+include_sensor_response = True  # whether to include the extra size due to the 
+                                #sensor response in the simulation
 
 # -----------------------------------------------------------------------------
 # angular grid, shared by every profile of the batch
