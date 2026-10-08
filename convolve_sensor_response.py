@@ -39,22 +39,24 @@ Notes
 * The input radiance grid is already extended to cover the SRF bandwidth
   (see fmip_radiance_batch.py), so no additional padding is needed.
 * Convolution is performed independently per column to preserve spatial structure.
-* Planck inversion uses scipy.optimize.fsolve for robustness.
+  The simulation grid is uniform in wavenumber, so the SRF sampled at the grid
+  offsets is one stationary kernel and the convolution is a single vectorized
+  filter pass (see frtmip_aux_functions.convolve_with_srf).
+* Planck inversion is the exact analytic inversion of the frequency-domain
+  Planck function (radiance per Hz, matching the ARTS/DISORT output units;
+  see frtmip_aux_functions.radiance2brightness_temp).
 * Output files mirror the input radiance structure: same frequency grid,
   same column indices (idx), same metadata where applicable.
-* Processing time grows with the number of frequency points and columns.
-  For ~2180 frequencies × 500 columns, expect ~5-10 seconds per chunk.
+* Processing is fast: for ~2180 frequencies x 500 columns, expect well under
+  a second per chunk.
 """
 
-import os
 import time
 import pathlib
 import glob
-import warnings
 
 import numpy as np
 import xarray as xr
-from pyarts import arts
 
 import frtmip_aux_functions as fax
 
@@ -71,7 +73,8 @@ results_folder = script_dir.parent / "results" / "RADIANCE"
 # Input data files
 sensor_response_file = data_dir / "sensor_response.nc"
 
-# Whether to include full 5D field (frequency, idx, lev, zenith, azimuth) if present
+# Whether to also convolve the full 5D field (frequency, idx, lev, zenith,
+# azimuth) if present in the input file
 # (normally only TOA slice is used, but enabling this may help with debugging)
 include_full_field = False
 
@@ -165,6 +168,7 @@ def main():
     sensor_response = xr.open_dataset(sensor_response_file)
     srf_wvn = sensor_response["wvn"].values
     srf_response = sensor_response["response"].values
+    sensor_response.close()
 
     print(f"  SRF shape: {srf_response.shape}")
     print(f"  SRF wavenumber range: {srf_wvn.min():.6f} to {srf_wvn.max():.6f} cm^-1")
@@ -209,6 +213,11 @@ def main():
         wvn_grid = radiance_ds.coords["wavenumber"].values
         idx_coords = radiance_ds.coords["idx"].values
 
+        # optional: full altitude-resolved cube, if exported by the batch run
+        spectral_radiance_field = None
+        if include_full_field and "spectral_radiance_field" in radiance_ds:
+            spectral_radiance_field = radiance_ds["spectral_radiance_field"].values
+
         # Get metadata from the dataset
         zenith_angle = radiance_ds["spectral_radiance_TOA"].attrs.get(
             "zenith_angle", 180.0
@@ -228,6 +237,11 @@ def main():
         spectral_radiance_convolved = fax.convolve_with_srf(
             spectral_radiance_TOA, f_grid, srf_wvn, srf_response
         )
+        if spectral_radiance_field is not None:
+            # frequency is axis 0 of the full cube as well
+            spectral_radiance_field_convolved = fax.convolve_with_srf(
+                spectral_radiance_field, f_grid, srf_wvn, srf_response
+            )
         t_conv_elapsed = time.time() - t_conv
         print(f"    Convolution completed in {t_conv_elapsed:.2f} s")
 
@@ -259,8 +273,9 @@ def main():
 
         # Sanity check: brightness temperature should be in a reasonable range
         bt_valid = brightness_temperature[(brightness_temperature > 50) & (brightness_temperature < 400)]
-        print(f"  Brightness temperature (valid range): {bt_valid.min():.1f} to "
-              f"{bt_valid.max():.1f} K")
+        if bt_valid.size:
+            print(f"  Brightness temperature (valid range): {bt_valid.min():.1f} to "
+                  f"{bt_valid.max():.1f} K")
         print(f"  Brightness temperature range (all): {brightness_temperature.min():.1f} to "
               f"{brightness_temperature.max():.1f} K")
 
@@ -269,28 +284,31 @@ def main():
         # =====================================================================
         print("  Creating output dataset...")
 
+        output_vars = {}
+        if export_convolved_radiance:
+            output_vars["spectral_radiance_convolved"] = (
+                ["frequency", "idx"],
+                spectral_radiance_convolved,
+                {
+                    "units": "W m^-2 Hz^-1 sr^-1",
+                    "description": "Spectral radiance after SRF convolution",
+                    "zenith_angle": float(zenith_angle),
+                    "srf_normalization_factor": float(srf_norm_factor),
+                },
+            )
+        if export_brightness_temperature:
+            output_vars["brightness_temperature"] = (
+                ["frequency", "idx"],
+                brightness_temperature,
+                {
+                    "units": "K",
+                    "description": "Brightness temperature from Planck inversion",
+                    "zenith_angle": float(zenith_angle),
+                },
+            )
+
         output_ds = xr.Dataset(
-            {
-                "spectral_radiance_convolved": (
-                    ["frequency", "idx"],
-                    spectral_radiance_convolved,
-                    {
-                        "units": "W m^-2 Hz^-1 sr^-1",
-                        "description": "Spectral radiance after SRF convolution",
-                        "zenith_angle": float(zenith_angle),
-                        "srf_normalization_factor": float(srf_norm_factor),
-                    },
-                ),
-                "brightness_temperature": (
-                    ["frequency", "idx"],
-                    brightness_temperature,
-                    {
-                        "units": "K",
-                        "description": "Brightness temperature from Planck inversion",
-                        "zenith_angle": float(zenith_angle),
-                    },
-                ),
-            },
+            output_vars,
             coords={
                 "idx": ("idx", idx_coords),
                 "frequency": ("frequency", f_grid, {"units": "Hz"}),
@@ -298,34 +316,42 @@ def main():
             },
         )
 
+        if spectral_radiance_field is not None:
+            # full cube, same layout as the input
+            # (frequency, idx, lev, zenith, azimuth)
+            output_ds["spectral_radiance_field_convolved"] = (
+                ["frequency", "idx", "lev", "zenith", "azimuth"],
+                spectral_radiance_field_convolved,
+                {
+                    "units": "W m^-2 Hz^-1 sr^-1",
+                    "description": "Full radiance cube after SRF convolution",
+                    "note": "level axis surface-first (index 0 = SFC, -1 = TOA)",
+                },
+            )
+
         # Copy attributes from input dataset if available
         output_ds.attrs.update(radiance_ds.attrs)
         output_ds.attrs["convolution_method"] = "spectral_srf_convolution"
         output_ds.attrs["srf_file"] = str(sensor_response_file.name)
-        output_ds.attrs["planck_inversion_method"] = "scipy.optimize.fsolve"
+        output_ds.attrs["planck_inversion_method"] = "analytic_planck_inversion"
 
         # =====================================================================
         # Step 4: Export results
         # =====================================================================
         if export_results:
-            # Construct output filename
-            base_name = radiance_file.stem  # e.g., "Reference_radiance_TOA_Nf2180_Nza20_fmip_radiance_batch_chunk000"
-            # Extract chunk identifier if present
-            if "_chunk" in base_name:
-                chunk_id = base_name.split("_chunk")[-1]  # e.g., "000"
-                out_name = (
-                    f"Reference_convolved_Nf{n_wvn}_Nza20_"
-                    f"fmip_radiance_batch_chunk{chunk_id}"
-                )
+            if not output_vars:
+                print("  Skipping export: both export_convolved_radiance and "
+                      "export_brightness_temperature are False")
             else:
-                out_name = (
-                    f"Reference_convolved_Nf{n_wvn}_Nza20_"
-                    f"fmip_radiance_batch"
-                )
-            out_file = results_folder / f"{out_name}.nc"
+                # mirror the input file name, radiance_TOA -> convolved
+                # (keeps Nf/Nza/setup/chunk id from fmip_radiance_batch.py)
+                out_name = radiance_file.stem.replace("radiance_TOA", "convolved")
+                out_file = results_folder / f"{out_name}.nc"
 
-            output_ds.to_netcdf(str(out_file))
-            print(f"  Exported {out_file}")
+                output_ds.to_netcdf(str(out_file))
+                print(f"  Exported {out_file}")
+
+        radiance_ds.close()
 
         # =====================================================================
         # Collect statistics
@@ -379,7 +405,9 @@ def main():
     all_bt_max = max(s["bt_max"] for s in all_stats)
     print(f"\nBrightness temperature range (all chunks): {all_bt_min:.1f} to {all_bt_max:.1f} K")
     if all_bt_min < 100 or all_bt_max > 400:
-        print(f"  WARNING: BT range outside [100K, 400K] — check for inversion issues.")
+        print(f"  NOTE: BT outside [100K, 400K]. Low values at strong absorption "
+              f"band centers (very small radiance, emission from the coldest "
+              f"levels) can be physical; check the input radiance otherwise.")
 
     print("\n" + "=" * 70)
 
