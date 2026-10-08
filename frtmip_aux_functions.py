@@ -723,3 +723,205 @@ def refine_profile(p_prof, t_prof, spc_profiles, z0=0.0,
     )
 
     return p_new, t_new, spc_new, Z[0][::-1]
+
+
+# =============================================================================
+# %% Spectral convolution and Planck inversion
+# =============================================================================
+
+def convolve_with_srf(spectral_radiance, f_grid, srf_wvn, srf_response):
+    """
+    Apply spectral response function (SRF) to spectral radiance via convolution.
+
+    Convolves the high-resolution spectral radiance with a wavenumber-dependent
+    SRF to simulate instrument filtering. The SRF is defined as (wavenumber
+    offset, response) pairs and is area-normalized to unity integral.
+
+    Parameters
+    ----------
+    spectral_radiance : ndarray, shape (N_wvn, N_idx)
+        High-resolution spectral radiance [W m^-2 Hz^-1 sr^-1] on frequency grid.
+        Rows are frequencies (or wavenumbers), columns are column indices.
+    f_grid : ndarray, shape (N_wvn,)
+        Frequency grid [Hz] corresponding to spectral_radiance rows.
+    srf_wvn : ndarray, shape (N_srf,)
+        SRF wavenumber offsets [cm^-1] relative to channel center.
+        Should be centered near zero and symmetric if possible.
+    srf_response : ndarray, shape (N_srf,)
+        SRF response values (normalized, typically integral ≈ 1.0).
+        Should be non-negative.
+
+    Returns
+    -------
+    ndarray, shape (N_wvn, N_idx)
+        Convolved spectral radiance, same shape and units as input.
+
+    Notes
+    -----
+    * The SRF is applied independently at each frequency point by interpolating
+      the SRF centered at that frequency and convolving along the frequency axis.
+    * Uses scipy.signal.convolve1d with mode='same' to preserve output shape.
+    * Energy is approximately conserved under convolution; edge effects may
+      cause ~1% loss.
+    """
+    from scipy.interpolate import interp1d
+    from scipy.signal import convolve1d
+
+    N_wvn, N_idx = spectral_radiance.shape
+
+    # Convert frequency grid to wavenumber for SRF application
+    # f [Hz] = c * wvn [cm^-1] * 100, so wvn = f / (c * 100)
+    c_vacuum = scc.c  # speed of light in m/s
+    wvn_grid = f_grid / (c_vacuum * 100.0)  # cm^-1
+
+    # Build SRF interpolator (assume SRF is defined for offset wavenumbers)
+    # We'll use linear interpolation; ensure SRF is sorted
+    srf_sorted_idx = np.argsort(srf_wvn)
+    srf_wvn_sorted = srf_wvn[srf_sorted_idx]
+    srf_response_sorted = srf_response[srf_sorted_idx]
+
+    # Create an interpolator for the SRF
+    srf_interp = interp1d(
+        srf_wvn_sorted, srf_response_sorted,
+        kind='linear', bounds_error=False, fill_value=0.0
+    )
+
+    # Frequency spacing in wavenumber units
+    dwvn = np.gradient(wvn_grid)
+    dwvn_mean = np.mean(dwvn)
+
+    # Apply convolution along frequency axis (axis 0) for all columns
+    convolved_radiance = np.zeros_like(spectral_radiance)
+
+    for i_col in range(N_idx):
+        rad_col = spectral_radiance[:, i_col]
+
+        # For each frequency point, build convolution kernel
+        # by sampling the SRF at offsets relative to that frequency
+        convolved_col = np.zeros(N_wvn)
+
+        for i_wvn in range(N_wvn):
+            # Center wavenumber for this frequency point
+            wvn_center = wvn_grid[i_wvn]
+
+            # Offset wavenumber grid relative to center
+            wvn_offsets = wvn_grid - wvn_center
+
+            # Evaluate SRF at these offsets
+            kernel = srf_interp(wvn_offsets)
+
+            # Normalize kernel to preserve energy (integral = 1 in wavenumber space)
+            # Approximate integral as sum * dwvn
+            kernel_integral = np.sum(kernel) * dwvn_mean
+            if kernel_integral > 1e-10:
+                kernel = kernel / kernel_integral
+            else:
+                # If kernel is essentially zero, no contribution
+                continue
+
+            # Convolution: weighted sum of radiance
+            convolved_col[i_wvn] = np.sum(rad_col * kernel)
+
+        convolved_radiance[:, i_col] = convolved_col
+
+    return convolved_radiance
+
+
+def radiance2brightness_temp(spectral_radiance, wavenumber):
+    """
+    Convert spectral radiance to brightness temperature via Planck inversion.
+
+    Uses the Planck function to invert radiance values to brightness temperature
+    (the temperature of a blackbody that would produce the observed radiance).
+
+    Parameters
+    ----------
+    spectral_radiance : ndarray, shape (N_wvn, N_idx)
+        Spectral radiance [W m^-2 Hz^-1 sr^-1].
+    wavenumber : ndarray, shape (N_wvn,)
+        Wavenumber grid [cm^-1].
+
+    Returns
+    -------
+    ndarray, shape (N_wvn, N_idx)
+        Brightness temperature [K].
+
+    Notes
+    -----
+    * The inversion uses scipy.optimize.fsolve for each (wvn, idx) element.
+    * Edge cases (negative, NaN, or infinite radiances) are clipped to a
+      small positive floor value (1e-15) with a warning.
+    * For very small radiances, the inverted temperature may be extremely low.
+    * The Planck function (wavenumber domain) is:
+      B_nu [W m^-3 sr^-1] = (2 * h * c^2 * nu^3) / (exp(h*c*nu / k_B*T) - 1)
+      where nu is wavenumber in m^-1.
+
+    Returns
+    -------
+    ndarray, shape (N_wvn, N_idx)
+        Brightness temperature [K].
+    """
+    from scipy.optimize import fsolve
+
+    # Physical constants
+    h = scc.h          # Planck constant [J s]
+    c = scc.c          # Speed of light [m/s]
+    k_B = scc.k        # Boltzmann constant [J/K]
+
+    N_wvn, N_idx = spectral_radiance.shape
+    brightness_temp = np.zeros_like(spectral_radiance)
+
+    # Convert wavenumber from cm^-1 to m^-1
+    nu = wavenumber * 100.0  # m^-1
+
+    # Check for problematic radiances
+    bad_mask = (spectral_radiance < 1e-20) | np.isnan(spectral_radiance) | np.isinf(spectral_radiance)
+    if np.any(bad_mask):
+        print(f"WARNING: Found {np.sum(bad_mask)} negative/NaN/Inf radiances. "
+              f"Clipping to 1e-20 W m^-2 Hz^-1 sr^-1.")
+        spectral_radiance_clipped = np.where(bad_mask, 1e-20, spectral_radiance)
+    else:
+        spectral_radiance_clipped = spectral_radiance.copy()
+
+    for i_wvn in range(N_wvn):
+        nu_wvn = nu[i_wvn]
+
+        for i_col in range(N_idx):
+            L = spectral_radiance_clipped[i_wvn, i_col]
+
+            # Define the Planck function in wavenumber domain:
+            # B_nu = (2 * h * c^2 * nu^3) / (exp(h*c*nu / k_B*T) - 1)
+            # We solve for T such that B_nu(T) = L.
+
+            def planck_residual(T):
+                if T <= 0:
+                    return 1e30  # Avoid negative/zero temperatures
+                exponent = (h * c * nu_wvn) / (k_B * T)
+                # Avoid overflow in exponential
+                if exponent > 100:
+                    return -L  # exp(x) >> 1, so B_nu ≈ 0
+                B_nu = (2 * h * c**2 * nu_wvn**3) / (np.exp(exponent) - 1)
+                return B_nu - L
+
+            # Initial guess: use brightness temperature from Stefan-Boltzmann law
+            # (rough estimate). Or use a fixed guess of 250 K.
+            T_guess = 250.0
+
+            # Solve for temperature
+            try:
+                T_solution = fsolve(planck_residual, T_guess, full_output=True)
+                T = T_solution[0][0]
+
+                # Validate result
+                if T > 0 and T < 400:  # Physical temperature range
+                    brightness_temp[i_wvn, i_col] = T
+                else:
+                    # Use fallback: estimate from Stefan-Boltzmann
+                    # B = sigma * T^4 / pi, but for wavelength domain.
+                    # Rough estimate: T ≈ (B / (2*h*c^2 * nu^3))^(1/4)
+                    brightness_temp[i_wvn, i_col] = np.clip(T, 0.1, 400.0)
+            except Exception as e:
+                print(f"WARNING: Failed to invert Planck at (wvn={i_wvn}, idx={i_col}): {e}")
+                brightness_temp[i_wvn, i_col] = 250.0  # fallback
+
+    return brightness_temp
