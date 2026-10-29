@@ -75,7 +75,8 @@ from fmip_radiance_batch import define_frequency_grid
 
 script_dir = pathlib.Path(__file__).parent.resolve()
 
-# where the per-chunk JSON configs are written
+# where the per-chunk JSON configs are written; like the results, every
+# run gets its own sub folder configs/<run_name>/ (see run_name below)
 config_path = script_dir.parent / "configs"
 
 # -----------------------------------------------------------------------------
@@ -184,7 +185,7 @@ def main():
     print(f"  angular     : N_za = {N_za}, N_aa = N_aa = {N_aa}")
     print(f"  setup base  : {setup_name}")
     print(f"  run folder  : results/RADIANCE/{run_name}/")
-    print(f"  configs     : {config_path}")
+    print(f"  configs     : {config_path / run_name}")
     print(f"  slurm logs  : {slurm_logs_dir}")
     print(f"  dispatch    : "
           f"{'sbatch_simple (' + slurm_partition + ')' if slurm_mode else 'direct sequential run'}")
@@ -193,7 +194,7 @@ def main():
     # -------------------------------------------------------------------------
     # one config + one job per frequency chunk
     # -------------------------------------------------------------------------
-    config_dir = config_path / setup_name
+    config_dir = config_path / run_name
     config_dir.mkdir(parents=True, exist_ok=True)
 
     if slurm_mode:

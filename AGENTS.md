@@ -15,7 +15,7 @@ plus sensor-response (IASI SRF) convolution to brightness temperature.
   discover files there recursively.
 - `scripts/` — all Python code. Run scripts **from the `scripts/` directory** (they use relative paths like `../data` and keep the FluxSimulator LUT cache at `<cwd>/cache/<setup_name>/`).
 - `scripts/cache/` — FluxSimulator LUT cache. Generated; safe to delete to force a rebuild.
-- `configs/` — per-frequency-chunk JSON configs written by `fmip_radiance_slurm_main.py`. Generated; safe to delete.
+- `configs/` — per-frequency-chunk JSON configs written by `fmip_radiance_slurm_main.py`, one subfolder per run (`configs/<run_name>/`). Generated; safe to delete.
 
 The **git repository root is `scripts/`** (remote: `https://github.com/m-brath/FORUM_FMIP.git`,
 branch `master`) — not the project root. Run all git commands from `scripts/`;
@@ -64,7 +64,8 @@ and `test.py` were removed) — do not introduce it.
   `results/RADIANCE/<run_name>/` with `run_name =
   <setup_name>_Nf<N_wvn>_Nza<N_za>` (defined as `run_name` in the batch and
   SLURM scripts; the SLURM launcher passes it to the frequency-chunk jobs so
-  all chunks of one launch share one folder). `convolve_sensor_response.py`
+  all chunks of one launch share one folder, and also uses it as the sub
+  folder for its JSON configs, `configs/<run_name>/`). `convolve_sensor_response.py`
   and `compare_convolved_with_obs.py` glob recursively and mirror convolved
   outputs into the input's run folder; `merge_radiance_chunks.py` has a
   `run_name` constant selecting the folder to merge. SLURM job logs
