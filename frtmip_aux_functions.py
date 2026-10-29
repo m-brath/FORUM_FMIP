@@ -12,7 +12,6 @@ import periodictable as pt
 from scipy import constants as scc
 from scipy.interpolate import make_interp_spline
 import xarray as xr
-import pyarts3 as pa
 
 
 
@@ -366,16 +365,6 @@ def get_species(cat_folder):
         species_list[abs_type] = species
 
     return species_list
-
-def get_species_from_catalog():
-
-    #get species in the catatlog
-    cat_folder = pa.data.parameters.datapath
-    cat_folder = [str(folder) for folder in cat_folder if 'arts-cat-data' in str(folder)][0]
-
-    all_species = get_species(cat_folder)
-
-    return all_species
 
 # =============================================================================
 # %% atmospheric 

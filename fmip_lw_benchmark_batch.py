@@ -11,8 +11,7 @@ Environment (mamba/conda):    pyarts
                               (/Users/u242031/miniforge3/envs/pyarts,
                                pyarts 2.6.20 + FluxSimulator -- NOT pyarts3)
 
-Input data: the same files as used by simple_radiance.py
-(created by prepare_data.py), in <repo>/data:
+Input data: the files created by prepare_data.py, in <repo>/data:
     atmdata.nc             columns (idx) x levels (lev), TOA-first
     sfcdata.nc             surface temperature, elevation, lat/lon per column
     surface_emissivity.nc  per-column spectral emissivity on a fixed wvn grid

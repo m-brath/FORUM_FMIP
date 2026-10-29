@@ -35,10 +35,9 @@ Use the mamba/conda env **`pyarts`** (`/Users/u242031/miniforge3/envs/pyarts`, P
 # or: mamba run -n pyarts python scripts/<script>.py
 ```
 
-It contains **pyarts 2.6.20 + FluxSimulator** (used by the batch scripts) and
-also **pyarts3 3.0.0dev11** (used by `simple_radiance.py` and
-`frtmip_aux_functions.py`). The batch benchmarks must stay on the pyarts 2.6
-FluxSimulator API — do not port them to pyarts3.
+It contains **pyarts 2.6.20 + FluxSimulator**, used by every script. The
+project does not use pyarts3 (the former pyarts3 scripts `simple_radiance.py`
+and `test.py` were removed) — do not introduce it.
 
 ## Scripts
 
@@ -51,9 +50,7 @@ FluxSimulator API — do not port them to pyarts3.
 | `fmip_radiance_slurm_sub.py` | Worker for ONE frequency chunk (`argv[1]` = config JSON); own FluxSimulator setup/LUT cache per chunk, column chunks looped inside; outputs `Reference_radiance_TOA_Nf*_..._fchunk*.nc` |
 | `merge_radiance_chunks.py` | Merge the frequency-chunk radiance files back to full-frequency files `Reference_radiance_TOA_merged_*.nc` |
 | `convolve_sensor_response.py` | Convolve radiance chunks with the IASI SRF, Planck-invert to brightness temperature |
-| `simple_radiance.py` | Single-column clear-sky radiance prototype (pyarts3) |
 | `frtmip_aux_functions.py` | Shared helpers (species formatting, profile refinement, constants) |
-| `test.py` | Throwaway pyarts3 scratch script (downloads ARTS catalogs, writes `atmosphere.nc`) — not part of the benchmark |
 
 ## Conventions & gotchas
 
