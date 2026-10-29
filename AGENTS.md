@@ -11,6 +11,7 @@ plus sensor-response (IASI SRF) convolution to brightness temperature.
 - `results/` — NetCDF benchmark outputs (`RADIANCE/` radiance chunks, `LW/` spectral fluxes).
 - `scripts/` — all Python code. Run scripts **from the `scripts/` directory** (they use relative paths like `../data` and keep the FluxSimulator LUT cache at `<cwd>/cache/<setup_name>/`).
 - `scripts/cache/` — FluxSimulator LUT cache. Generated; safe to delete to force a rebuild.
+- `configs/` — per-frequency-chunk JSON configs written by `fmip_radiance_slurm_main.py`. Generated; safe to delete.
 
 The **git repository root is `scripts/`** (remote: `https://github.com/m-brath/FORUM_FMIP.git`,
 branch `master`) — not the project root. Run all git commands from `scripts/`;
@@ -42,6 +43,9 @@ FluxSimulator API — do not port them to pyarts3.
 | `prepare_data.py` | Convert `rawdata/*.H5` → `data/*.nc` (run first, after any rawdata change) |
 | `fmip_lw_benchmark_batch.py` | LW flux benchmark, `FluxSimulator.flux_simulator_batch` → `results/LW/` |
 | `fmip_radiance_batch.py` | TOA spectral-radiance benchmark, `FluxSimulator.radiance_simulator_batch` → `results/RADIANCE/` (one file per chunk) |
+| `fmip_radiance_slurm_main.py` | SLURM launcher: slices the frequency grid into chunks, writes JSON configs (`configs/<setup>/`) and dispatches one job per frequency chunk via `sbatch_simple` (levante) or runs the sub-scripts sequentially (local, auto-detected) |
+| `fmip_radiance_slurm_sub.py` | Worker for ONE frequency chunk (`argv[1]` = config JSON); own FluxSimulator setup/LUT cache per chunk, column chunks looped inside; outputs `Reference_radiance_TOA_Nf*_..._fchunk*.nc` |
+| `merge_radiance_chunks.py` | Merge the frequency-chunk radiance files back to full-frequency files `Reference_radiance_TOA_merged_*.nc` |
 | `convolve_sensor_response.py` | Convolve radiance chunks with the IASI SRF, Planck-invert to brightness temperature |
 | `simple_radiance.py` | Single-column clear-sky radiance prototype (pyarts3) |
 | `frtmip_aux_functions.py` | Shared helpers (species formatting, profile refinement, constants) |
@@ -58,6 +62,16 @@ FluxSimulator API — do not port them to pyarts3.
 - **LUT cache**: built up front from *all* atmospheres in the input file. If the
   spectrum or species setup changes, delete `scripts/cache/<setup_name>/` (or set
   `recalc_lut = True`) or results will be silently wrong.
+- **Frequency-chunked SLURM runs** (`fmip_radiance_slurm_main.py` /
+  `_sub.py`): each frequency chunk gets its own FluxSimulator setup name
+  `<setup_base>_<fchunk…>` and therefore its own LUT cache dir. The per-chunk
+  LUT is built by the job itself, on its sub-frequency grid but from *all*
+  atmospheres of the input file (like the plain benchmark) — LUT node grids
+  do not depend on `f_grid`, so all chunk LUTs and the non-chunked run share
+  identical state ranges and results agree with a single full-grid run.
+  Changing `N_wvn` or `freq_per_chunk` changes the identifiers → new cache
+  dirs. The sub-scripts pin their cwd to `scripts/` so the cache location is
+  identical on levante and locally.
 - **Level ordering differs by file**: `atmdata.nc` is TOA-first, but radiance
   arrays returned by the batch calls are surface-first (index 0 = SFC, last =
   TOA). The TOA slice is `radiance[i][:, -1, :, :]`.
