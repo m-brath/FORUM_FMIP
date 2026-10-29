@@ -4,11 +4,11 @@
 Merge the frequency-chunk radiance files of fmip_radiance_slurm_main.py /
 fmip_radiance_slurm_sub.py back into one file per column subset.
 
-Input (results/RADIANCE/):
+Input (results/RADIANCE/<run_name>/):
     Reference_radiance_TOA_Nf*_Nza*_<setup_base>_fchunk*_fmin*_fmax*GHz_N*_
     [chunk###].nc   (one file per frequency chunk and column chunk)
 
-Output:
+Output (same run sub folder):
     Reference_radiance_TOA_merged_<setup_base>[_chunk###].nc
     -- one file per column chunk group (no column chunk suffix if the jobs
     used a single column chunk), containing the full-frequency
@@ -38,7 +38,12 @@ import xarray as xr
 # =============================================================================
 
 script_dir = pathlib.Path(__file__).parent.resolve()
-results_folder = script_dir.parent / "results" / "RADIANCE"
+
+# run sub folder of results/RADIANCE/ written by one
+# fmip_radiance_slurm_main.py launch
+# (run_name = <setup_name>_Nf<N_wvn>_Nza<N_za>)
+run_name = "fmip_radiance_batch_slurm_Nf200_Nza20"
+results_folder = script_dir.parent / "results" / "RADIANCE" / run_name
 
 # glob for the frequency-chunk files of one setup (merged files are excluded
 # automatically since they start with "..._merged_")

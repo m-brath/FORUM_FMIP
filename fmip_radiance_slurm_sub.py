@@ -31,9 +31,11 @@ Behaviour
 * The column subset is simulated in column chunks exactly as in
   fmip_radiance_batch.py (one fresh FluxSimulator instance per chunk, LUT
   read from the cache with recalc=False).
-* Output: results/RADIANCE/Reference_radiance_TOA_Nf<N_chunk>_Nza<N_za>
-  _<setup>[_chunk###].nc -- picked up by convolve_sensor_response.py's
-  glob; merge_radiance_chunks.py re-assembles the full frequency grid.
+* Output: results/RADIANCE/<run_name>/Reference_radiance_TOA_Nf<N_chunk>_
+  Nza<N_za>_<setup>[_chunk###].nc, with the run sub folder taken from the
+  config ("run_name", falling back to the setup base name for old configs).
+  convolve_sensor_response.py discovers these files recursively;
+  merge_radiance_chunks.py re-assembles the full frequency grid.
 
 The script chdirs to its own folder so the FluxSimulator LUT cache always
 lives at <scripts>/cache/<setup> on both machines.
@@ -87,6 +89,14 @@ def simulate_frequency_chunk(config):
 
     identifier = config["identifier"]
     flxsim_setup = config["flxsim_setup"]
+
+    # run sub folder in results/RADIANCE/, shared by every frequency chunk of
+    # one launch (configs written by fmip_radiance_slurm_main.py carry it);
+    # for old configs without the key, fall back to the setup base name,
+    # i.e. flxsim_setup with the per-chunk identifier stripped
+    run_name = config.get("run_name") or flxsim_setup.removesuffix(
+        f"_{identifier}")
+    run_results_folder = results_folder / run_name
 
     f_grid = np.asarray(config["f_grid"], dtype=np.float64)
     wvn_grid = arts.convert.freq2kaycm(f_grid)
@@ -181,9 +191,10 @@ def simulate_frequency_chunk(config):
     print(f"  setup name  : {flxsim_setup}")
     print(f"  LUT cache   : {os.path.join(os.getcwd(), 'cache', flxsim_setup)}")
     print(f"  recalc LUT  : {recalc_lut}")
+    print(f"  results     : {run_results_folder}")
     print("=" * 70)
 
-    results_folder.mkdir(parents=True, exist_ok=True)
+    run_results_folder.mkdir(parents=True, exist_ok=True)
 
     # ==========================================================================
     # %% atmospheres for ALL columns of the input file (surface-first)
@@ -372,7 +383,7 @@ def simulate_frequency_chunk(config):
         )
         if n_chunks > 1:
             fname += f"_chunk{ck:03d}"
-        out_file = results_folder / f"{fname}.nc"
+        out_file = run_results_folder / f"{fname}.nc"
         ds.to_netcdf(str(out_file))
         print(f"  exported {out_file}\n")
 

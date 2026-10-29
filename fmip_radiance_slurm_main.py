@@ -23,9 +23,10 @@ Frequency chunking vs. the plain fmip_radiance_batch.py
   <cwd>/cache/<setup_name>/. No LUT state is shared between parallel jobs.
   The per-chunk LUT is built by the job itself, from the columns that job
   simulates, on the job's sub-frequency grid.
-* Output: results/RADIANCE/Reference_radiance_TOA_Nf<N_chunk>_...
-  -- one file per (frequency chunk [, column chunk]). These match the glob
-  of convolve_sensor_response.py, so that script picks them up unchanged.
+* Output: results/RADIANCE/<run_name>/Reference_radiance_TOA_Nf<N_chunk>_...
+  -- one file per (frequency chunk [, column chunk]), all frequency chunks of
+  one launch sharing the same run sub folder (run_name is passed through the
+  config). convolve_sensor_response.py discovers them recursively, and
   merge_radiance_chunks.py re-assembles the full-frequency files.
 
 On levante (SLURM)
@@ -110,6 +111,12 @@ export_full_field = False   # also store the full (frequency, idx, lev, za, aa)
 # f"{setup_name}_{identifier}", so every chunk has its own LUT cache dir.
 setup_name = "fmip_radiance_batch_slurm"
 
+# Run identity: every launch writes its results into the sub folder
+# results/RADIANCE/<run_name>/ (shared by all frequency chunks of this
+# launch), keeping different runs/configurations apart. Passed to the
+# sub-scripts through the config.
+run_name = f"{setup_name}_Nf{N_wvn}_Nza{N_za}"
+
 # -----------------------------------------------------------------------------
 # SLURM dispatch
 # -----------------------------------------------------------------------------
@@ -161,6 +168,7 @@ def main():
           f"({n_to_run} columns, column chunks of <= {chunk_size} inside jobs)")
     print(f"  angular     : N_za = {N_za}, N_aa = N_aa = {N_aa}")
     print(f"  setup base  : {setup_name}")
+    print(f"  run folder  : results/RADIANCE/{run_name}/")
     print(f"  configs     : {config_path}")
     print(f"  dispatch    : "
           f"{'sbatch_simple (' + slurm_partition + ')' if slurm_mode else 'direct sequential run'}")
@@ -199,6 +207,8 @@ def main():
             "points_added_per_step": int(points_added_per_step),
             "recalc_lut": bool(recalc_lut),
             "export_full_field": bool(export_full_field),
+            # results sub folder name shared by all chunks of this run
+            "run_name": run_name,
         }
 
         config_filename = config_dir / f"config_{identifier}.json"

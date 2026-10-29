@@ -16,12 +16,16 @@ convolved radiance to brightness temperature (the equivalent blackbody temperatu
 Environment (mamba/conda):    pyarts
                               (same as fmip_radiance_batch.py)
 
-Input data: Spectral radiance chunks from fmip_radiance_batch.py:
-    results/RADIANCE/Reference_radiance_TOA_Nf*_*.nc  (one file per chunk)
+Input data: Spectral radiance chunks from fmip_radiance_batch.py /
+fmip_radiance_slurm_sub.py, searched recursively under results/RADIANCE/,
+so every run sub folder results/RADIANCE/<run_name>/ is picked up:
+    Reference_radiance_TOA_Nf*.nc  (one file per chunk)
     data/sensor_response.nc  (SRF wavenumber offsets and response)
 
 Output:
-    results/RADIANCE/Reference_convolved_*_chunk*.nc (one per input radiance chunk)
+    results/RADIANCE/<run_name>/Reference_convolved_*_chunk*.nc
+    (one per input radiance chunk, written to the same run sub folder as
+    its input)
     Each output file contains:
     - spectral_radiance_convolved: convolved radiance (frequency, idx)
     - brightness_temperature: brightness temperature (frequency, idx)
@@ -30,7 +34,7 @@ Output:
 Example
 -------
 Simply run the script; it will automatically discover all radiance chunks
-in results/RADIANCE/ and process them sequentially.
+in the run sub folders of results/RADIANCE/ and process them sequentially.
 
     $ python convolve_sensor_response.py
 
@@ -92,6 +96,9 @@ def discover_radiance_chunks(results_folder):
     """
     Discover all radiance output files matching the fmip_radiance_batch pattern.
 
+    The search is recursive, so the per-run sub folders of results/RADIANCE/
+    (results/RADIANCE/<run_name>/) are included.
+
     Parameters
     ----------
     results_folder : pathlib.Path
@@ -101,10 +108,11 @@ def discover_radiance_chunks(results_folder):
     -------
     list of pathlib.Path
         Sorted list of NetCDF files matching the pattern
-        Reference_radiance_TOA_Nf*.nc (chunks and non-chunked).
+        Reference_radiance_TOA_Nf*.nc (chunks and non-chunked, in any run
+        sub folder).
     """
-    pattern = str(results_folder / "Reference_radiance_TOA_Nf*.nc")
-    files = sorted(glob.glob(pattern))
+    pattern = str(results_folder / "**" / "Reference_radiance_TOA_Nf*.nc")
+    files = sorted(glob.glob(pattern, recursive=True))
     return [pathlib.Path(f) for f in files]
 
 
@@ -191,7 +199,7 @@ def main():
 
     print(f"  Found {len(radiance_files)} radiance chunk(s):")
     for rf in radiance_files:
-        print(f"    - {rf.name}")
+        print(f"    - {rf.relative_to(results_folder)}")
 
     # -------------------------------------------------------------------------
     # Process each radiance chunk
@@ -344,9 +352,10 @@ def main():
                       "export_brightness_temperature are False")
             else:
                 # mirror the input file name, radiance_TOA -> convolved
-                # (keeps Nf/Nza/setup/chunk id from fmip_radiance_batch.py)
+                # (keeps Nf/Nza/setup/chunk id from fmip_radiance_batch.py),
+                # and write it to the same run sub folder as the input
                 out_name = radiance_file.stem.replace("radiance_TOA", "convolved")
-                out_file = results_folder / f"{out_name}.nc"
+                out_file = radiance_file.parent / f"{out_name}.nc"
 
                 output_ds.to_netcdf(str(out_file))
                 print(f"  Exported {out_file}")

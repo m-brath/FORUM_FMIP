@@ -57,6 +57,9 @@ Notes
   same for the presimulation and every chunk instance, because the whole
   batch shares setup_name = fmip_radiance_batch). Delete the cache folder
   manually to force a rebuild if the spectrum or species setup is changed.
+* Output: every run writes to its own sub folder
+  results/RADIANCE/<run_name>/ with run_name = <setup_name>_Nf<N_wvn>_Nza<N_za>,
+  so different configurations do not mix (see the results folder constant).
 * Radiance units: the stored radiance is the raw ARTS/DISORT spectral
   radiance (W m^-2 Hz^-1 sr^-1). Confirm against a first run and adjust the
   NetCDF attribute if your convention differs.
@@ -89,8 +92,8 @@ surface_emissivity_file = data_dir / "surface_emissivity.nc"
 satdata_file = data_dir / "satdata.nc"
 sensor_response_file = data_dir / "sensor_response.nc"
 
-# results folder
-results_folder = script_dir.parent / "results" / "RADIANCE"
+# results base folder; the run-specific sub folder is defined below, after
+# setup_name (see "results folder")
 
 # -----------------------------------------------------------------------------
 # longwave (wavenumber) grid size, shared by every profile of the batch
@@ -142,6 +145,14 @@ points_added_per_step = 3   # points inserted per interval / pass
 # A NEW setup name -> its own LUT cache dir <cwd>/cache/<setup_name>/ is
 # used; nothing is shared with the fmip_batch (flux) cache.
 setup_name = "fmip_radiance_batch"
+
+# -----------------------------------------------------------------------------
+# results folder: every run/configuration gets its own sub folder of
+# results/RADIANCE/, named after the run identity
+# (FluxSimulator setup name + frequency/angular grid)
+# -----------------------------------------------------------------------------
+run_name = f"{setup_name}_Nf{N_wvn}_Nza{N_za}"
+results_folder = (script_dir.parent / "results" / "RADIANCE" / run_name)
 
 
 # =============================================================================
@@ -455,6 +466,7 @@ def main():
     print(f"  setup name  : {setup_name}")
     print(f"  LUT cache   : {os.path.join(os.getcwd(), 'cache', setup_name)}")
     print(f"  recalc LUT  : {recalc_lut}")
+    print(f"  results     : {results_folder}")
     print("=" * 70)
 
     if export_results:
