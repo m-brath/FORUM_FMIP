@@ -70,7 +70,10 @@ FluxSimulator API — do not port them to pyarts3.
   all chunks of one launch share one folder). `convolve_sensor_response.py`
   and `compare_convolved_with_obs.py` glob recursively and mirror convolved
   outputs into the input's run folder; `merge_radiance_chunks.py` has a
-  `run_name` constant selecting the folder to merge.
+  `run_name` constant selecting the folder to merge. SLURM job logs
+  (*.out/*.err) are written to `results/RADIANCE/<run_name>/logs/` (the
+  launcher submits `sbatch_simple` from that folder, since Slurm puts job
+  logs in the submission directory; never pollute `scripts/`).
 - **LUT cache**: built up front from *all* atmospheres in the input file. If the
   spectrum or species setup changes, delete `scripts/cache/<setup_name>/` (or set
   `recalc_lut = True`) or results will be silently wrong.

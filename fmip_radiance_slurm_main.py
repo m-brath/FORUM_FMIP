@@ -36,9 +36,17 @@ On levante (SLURM)
     sbatch_simple <partition> <jobname> <mem> <runtime> \
         python fmip_radiance_slurm_sub.py <config.json>
 
+Slurm writes the job log files (*.out / *.err) into the submission
+directory, so the launcher submits from slurm_logs_dir
+(results/RADIANCE/<run_name>/logs) instead of the scripts folder. The job
+itself is unaffected: fmip_radiance_slurm_sub.py pins its cwd to the
+scripts/ folder (LUT cache location), and the config / script paths passed
+to sbatch_simple are absolute.
+
 On this machine `sbatch_simple` does not exist and the launcher instead runs
 the sub-scripts directly and sequentially with the current python
-(the pyarts env). Set use_slurm to force either mode.
+(the pyarts env); no log files are written (direct console output).
+Set use_slurm to force either mode.
 
 Environment (mamba/conda): pyarts (pyarts 2.6 + FluxSimulator, NOT pyarts3).
 Run from the scripts/ directory (LUT cache: <cwd>/cache/<setup_name>/).
@@ -117,6 +125,13 @@ setup_name = "fmip_radiance_batch_slurm"
 # sub-scripts through the config.
 run_name = f"{setup_name}_Nf{N_wvn}_Nza{N_za}"
 
+# SLURM job log files (*.out / *.err): Slurm writes them into the directory
+# the submission runs from, so sbatch_simple is dispatched with this folder
+# as cwd (keeps the scripts/ folder clean). Defaults to a logs sub folder of
+# the run's results folder. Ignored in direct (non-SLURM) mode.
+slurm_logs_dir = (script_dir.parent / "results" / "RADIANCE"
+                  / run_name / "logs")
+
 # -----------------------------------------------------------------------------
 # SLURM dispatch
 # -----------------------------------------------------------------------------
@@ -170,6 +185,7 @@ def main():
     print(f"  setup base  : {setup_name}")
     print(f"  run folder  : results/RADIANCE/{run_name}/")
     print(f"  configs     : {config_path}")
+    print(f"  slurm logs  : {slurm_logs_dir}")
     print(f"  dispatch    : "
           f"{'sbatch_simple (' + slurm_partition + ')' if slurm_mode else 'direct sequential run'}")
     print("=" * 70)
@@ -179,6 +195,10 @@ def main():
     # -------------------------------------------------------------------------
     config_dir = config_path / setup_name
     config_dir.mkdir(parents=True, exist_ok=True)
+
+    if slurm_mode:
+        # submission directory for sbatch_simple -> Slurm log files land here
+        slurm_logs_dir.mkdir(parents=True, exist_ok=True)
 
     joblist = []
     for i in range(n_f_chunks):
@@ -235,7 +255,11 @@ def main():
 
         if not only_configs:
             if slurm_mode:
-                subprocess.run(command_str)
+                # submit from the log folder: Slurm writes the job *.out /
+                # *.err files into the submission directory, and the job's
+                # own cwd is pinned to scripts/ by the sub script (LUT
+                # cache), so the log location has no side effects
+                subprocess.run(command_str, cwd=slurm_logs_dir)
             else:
                 # run sequentially and fail loudly on a broken chunk
                 subprocess.run(command_str, check=True)
