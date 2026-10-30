@@ -7,9 +7,11 @@ fmip_radiance_slurm_sub.py back into one file per column subset.
 Input (results/RADIANCE/<run_name>/):
     Reference_radiance_TOA_Nf*_Nza*_<setup_base>_fchunk*_fmin*_fmax*GHz_N*_
     [chunk###].nc   (one file per frequency chunk and column chunk)
+    with <setup_base> derived from run_name
+    (run_name = <setup_base>_Nf<N_wvn>_Nza<N_za>)
 
 Output (same run sub folder):
-    Reference_radiance_TOA_merged_<setup_base>[_chunk###].nc
+    Reference_radiance_TOA_merged_<run_name>[_chunk###].nc
     -- one file per column chunk group (no column chunk suffix if the jobs
     used a single column chunk), containing the full-frequency
     spectral_radiance_TOA on the assembled frequency grid.
@@ -21,8 +23,9 @@ Notes
   increasing and free of duplicated coordinates.
 * altitude_min / altitude_max are identical in every frequency chunk, so they
   are taken from the first file instead of stacked.
-* Only run parameters (the file glob) are constants at the top of this file,
-  consistent with the other scripts.
+* Only the run name is a constant at the top of this file; the setup base
+  name and the chunk-file glob are derived from it, consistent with the
+  other scripts.
 """
 
 import re
@@ -45,12 +48,18 @@ script_dir = pathlib.Path(__file__).parent.resolve()
 run_name = "fmip_radiance_batch_slurm_Nf200_Nza20"
 results_folder = script_dir.parent / "results" / "RADIANCE" / run_name
 
-# glob for the frequency-chunk files of one setup (merged files are excluded
-# automatically since they start with "..._merged_")
-chunk_pattern = "Reference_radiance_TOA_Nf*_fmip_radiance_batch_slurm_fchunk*.nc"
+# setup name base derived from run_name (the <setup_name> part of
+# run_name = <setup_name>_Nf<N_wvn>_Nza<N_za>)
+m = re.match(r"(.*)_Nf\d+_Nza\d+$", run_name)
+if m is None:
+    raise ValueError(
+        f"run_name '{run_name}' does not follow the naming convention "
+        f"<setup_name>_Nf<N_wvn>_Nza<N_za>")
+setup_base = m.group(1)
 
-# setup name base used in the merged output file name
-setup_base = "fmip_radiance_batch_slurm"
+# glob for the frequency-chunk files of this run (merged files are excluded
+# automatically since they start with "..._merged_")
+chunk_pattern = (f"Reference_radiance_TOA_Nf*_Nza*_{setup_base}_fchunk*.nc")
 
 
 # =============================================================================
@@ -130,7 +139,7 @@ def main():
 
         suffix = f"_chunk{key}" if key else ""
         out_file = (results_folder /
-                    f"Reference_radiance_TOA_merged_{setup_base}{suffix}.nc")
+                    f"Reference_radiance_TOA_merged_{run_name}{suffix}.nc")
         merged.attrs["history"] = (
             f"merged {len(dss)} frequency-chunk file(s) "
             f"matching '{chunk_pattern}'")
