@@ -17,8 +17,8 @@ Environment (mamba/conda):    pyarts
                               (same as fmip_radiance_batch.py)
 
 Input data: Spectral radiance chunks from fmip_radiance_batch.py /
-fmip_radiance_slurm_sub.py, searched recursively under results/RADIANCE/,
-so every run sub folder results/RADIANCE/<run_name>/ is picked up:
+fmip_radiance_slurm_sub.py in the run sub folder selected by the run_name
+constant, results/RADIANCE/<run_name>/:
     Reference_radiance_TOA_Nf*.nc  (one file per chunk)
     data/sensor_response.nc  (SRF wavenumber offsets and response)
 
@@ -33,8 +33,9 @@ Output:
 
 Example
 -------
-Simply run the script; it will automatically discover all radiance chunks
-in the run sub folders of results/RADIANCE/ and process them sequentially.
+Set the run_name constant to the run sub folder to process, then run the
+script; it discovers all radiance chunks in
+results/RADIANCE/<run_name>/ and processes them sequentially.
 
     $ python convolve_sensor_response.py
 
@@ -72,7 +73,11 @@ import frtmip_aux_functions as fax
 # Location of this script
 script_dir = pathlib.Path(__file__).parent.resolve()
 data_dir = script_dir.parent / "data"
-results_folder = script_dir.parent / "results" / "RADIANCE"
+
+# run sub folder of results/RADIANCE/ written by one launch
+# (run_name = <setup_name>_Nf<N_wvn>_Nza<N_za>)
+run_name = "fmip_radiance_batch_Nf109000_Nza20"
+results_folder = script_dir.parent / "results" / "RADIANCE" / run_name
 
 # Input data files
 sensor_response_file = data_dir / "sensor_response.nc"
@@ -96,20 +101,21 @@ def discover_radiance_chunks(results_folder):
     """
     Discover all radiance output files matching the fmip_radiance_batch pattern.
 
-    The search is recursive, so the per-run sub folders of results/RADIANCE/
-    (results/RADIANCE/<run_name>/) are included.
+    The search covers the run sub folder selected by the run_name constant
+    (results/RADIANCE/<run_name>/); the recursive glob also picks up any
+    files in nested sub folders.
 
     Parameters
     ----------
     results_folder : pathlib.Path
-        Path to results/RADIANCE/ folder.
+        Path to the run sub folder results/RADIANCE/<run_name>/.
 
     Returns
     -------
     list of pathlib.Path
         Sorted list of NetCDF files matching the pattern
-        Reference_radiance_TOA_Nf*.nc (chunks and non-chunked, in any run
-        sub folder).
+        Reference_radiance_TOA_Nf*.nc (chunks and non-chunked; merged files
+        are excluded by the pattern).
     """
     pattern = str(results_folder / "**" / "Reference_radiance_TOA_Nf*.nc")
     files = sorted(glob.glob(pattern, recursive=True))
@@ -189,6 +195,16 @@ def main():
     # Discover radiance chunks
     # -------------------------------------------------------------------------
     print("\nDiscovering radiance chunks...")
+    if not results_folder.is_dir():
+        results_root = results_folder.parent
+        available = sorted(
+            p.name for p in results_root.iterdir() if p.is_dir()
+        ) if results_root.is_dir() else []
+        raise FileNotFoundError(
+            f"Run sub folder {results_folder} does not exist. "
+            f"Set run_name to one of the available runs: "
+            f"{', '.join(available) if available else '(none)'}"
+        )
     radiance_files = discover_radiance_chunks(results_folder)
 
     if not radiance_files:
