@@ -50,6 +50,8 @@ and `test.py` were removed) — do not introduce it.
 | `fmip_radiance_slurm_sub.py` | Worker for ONE frequency chunk (`argv[1]` = config JSON); own FluxSimulator setup/LUT cache per chunk, column chunks looped inside; outputs `Reference_radiance_TOA_Nf*_..._fchunk*.nc` |
 | `merge_radiance_chunks.py` | Merge the frequency-chunk radiance files back to full-frequency files `Reference_radiance_TOA_merged_*.nc` |
 | `convolve_sensor_response.py` | Convolve radiance chunks with the IASI SRF, Planck-invert to brightness temperature |
+| `compare_convolved_with_obs.py` | Compare convolved radiances/T_B with IASI observations (`data/satdata.nc`) → per-wvn stats + histograms in `results/COMPARISON/`; runs after `convolve_sensor_response.py` |
+| `plot_lut_species_crosssections.py` | Diagnostic: per-species absorption cross sections from the stored LUT cache and/or a fine-grid single-state recomputation (needs `ARTS_DATA_PATH`) |
 | `frtmip_aux_functions.py` | Shared helpers (species formatting, profile refinement, constants) |
 
 ## Conventions & gotchas
