@@ -113,11 +113,14 @@ def main():
                     f"{fmaxs[i]:e} >= {fmins[i + 1]:e}"
                 )
 
-        # concatenate the radiance (and the frequency-dependent coords)
+        # concatenate the radiance (and the frequency-dependent coords);
+        # join="outer" because the chunk frequency grids differ by design
+        # (pinned explicitly -- xarray will change the default to "exact")
         merged = xr.concat(
             [ds[["spectral_radiance_TOA", "frequency", "wavenumber"]]
              for ds in dss],
             dim="frequency",
+            join="outer",
         )
 
         # check the assembled grid
