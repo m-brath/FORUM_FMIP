@@ -48,7 +48,7 @@ and `test.py` were removed) — do not introduce it.
 | `fmip_radiance_batch.py` | Standalone (non-chunked) TOA radiance benchmark → `results/RADIANCE/<run_name>/`; also the module others import (`define_frequency_grid`) |
 | `fmip_radiance_slurm_main.py` | Entry point for chunked radiance runs: writes JSON configs (`configs/<run_name>/`) and dispatches one job per frequency chunk to `fmip_radiance_slurm_sub.py` |
 | `fmip_radiance_slurm_sub.py` | Worker for ONE frequency chunk — run ONLY via the launcher (`argv[1]` = config JSON) |
-| `merge_radiance_chunks.py` | Frequency-chunk files → `Reference_radiance_TOA_merged_*.nc` in the same run folder; terminal (nothing downstream reads merged files); only run constant is `run_name` |
+| `merge_radiance_chunks.py` | Frequency-chunk files → `Reference_radiance_TOA_merged_*.nc` in the same run folder; terminal (nothing downstream reads merged files); run constants are `run_name` and `delete_chunk_files` (opt-in removal of the chunk inputs after a successful merge) |
 | `convolve_sensor_response.py` | `results/RADIANCE/**/Reference_radiance_TOA_Nf*.nc` → `Reference_convolved_*` mirrored into the same run folder |
 | `compare_convolved_with_obs.py` | convolved files + `data/satdata.nc` → stats/histograms in `results/COMPARISON/`; runs after `convolve_sensor_response.py` |
 | `plot_lut_species_crosssections.py` | Optional diagnostic for the T_B comparison: reads `cache/<setup>/LUT.xml` + `data/atmdata.nc`; needs `ARTS_DATA_PATH`; no downstream consumer |

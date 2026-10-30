@@ -26,6 +26,10 @@ Notes
 * Only the run name is a constant at the top of this file; the setup base
   name and the chunk-file glob are derived from it, consistent with the
   other scripts.
+* With delete_chunk_files = True the merged frequency-chunk input files are
+  removed after ALL merged outputs have been written and verified. This is
+  one-way: merged files are excluded from the chunk glob, so re-running the
+  script afterwards finds no chunk files and raises FileNotFoundError.
 """
 
 import re
@@ -61,6 +65,11 @@ setup_base = m.group(1)
 # automatically since they start with "..._merged_")
 chunk_pattern = (f"Reference_radiance_TOA_Nf*_Nza*_{setup_base}_fchunk*.nc")
 
+# delete the frequency-chunk input files after a successful merge (the merged
+# outputs can always be re-derived from the chunk files, but not vice versa,
+# so this is opt-in -- set to True only when the cleanup is wanted)
+delete_chunk_files = False
+
 
 # =============================================================================
 # %% main
@@ -89,13 +98,18 @@ def main():
         key = m.group(1) if m else ""
         groups.setdefault(key, []).append(f)
 
+    # keep track of which chunk files went into which merged output so they
+    # can be removed at the end when delete_chunk_files is set
+    merged_outputs = []
+
     for key, group in sorted(groups.items()):
         # sort the frequency chunks by their minimum frequency
-        dss = []
-        for f in sorted(group,
-                        key=lambda p: float(
-                            xr.open_dataset(p)["frequency"].values.min())):
-            dss.append(xr.open_dataset(f))
+        fmin_of = {}
+        for f in group:
+            with xr.open_dataset(f) as ds:
+                fmin_of[f] = float(ds["frequency"].values.min())
+        dss = [xr.open_dataset(f)
+               for f in sorted(group, key=fmin_of.get)]
 
         fmins = [float(ds["frequency"].values.min()) for ds in dss]
         fmaxs = [float(ds["frequency"].values.max()) for ds in dss]
@@ -148,6 +162,28 @@ def main():
             f"matching '{chunk_pattern}'")
         merged.to_netcdf(str(out_file))
         print(f"  exported {out_file}")
+
+        # close the chunk inputs so they can be removed later
+        for ds in dss:
+            ds.close()
+        merged_outputs.append((out_file, group))
+
+    if delete_chunk_files:
+        # only delete once every group has a valid merged output on disk
+        for out_file, group in merged_outputs:
+            if not (out_file.is_file() and out_file.stat().st_size > 0):
+                raise RuntimeError(
+                    f"merged output {out_file} is missing or empty -- "
+                    f"keeping the {len(group)} frequency-chunk file(s)")
+        removed = 0
+        for out_file, group in merged_outputs:
+            for f in group:
+                try:
+                    pathlib.Path(f).unlink()
+                    removed += 1
+                except OSError as e:
+                    print(f"  WARNING: could not remove {f}: {e}")
+        print(f"\nremoved {removed} frequency-chunk file(s)")
 
     print("\ndone")
 
