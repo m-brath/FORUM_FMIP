@@ -23,35 +23,44 @@ In addition, the distribution of the differences is accumulated as a
 per-wavenumber histogram and plotted as pcolormesh (x = wavenumber,
 y = difference bin, colour = normalised frequency / probability density).
 
-Two simulation setups are compared independently (one output set each):
-    - Nf42301  : Reference_convolved_Nf42301_Nza20_Naa1_chunk*.nc
-    - Nf109000 : Reference_convolved_Nf109000_Nza20_fmip_radiance_batch_chunk*.nc
-Both convolve to the same 8461-channel observation grid (645-2760 cm^-1,
-0.25 cm^-1 spacing) and carry the global column index (idx 0-19705), so the
-comparison is an exact collocation - no interpolation needed.
+One simulation run is compared per invocation, selected by the run_name
+constant (results/RADIANCE/<run_name>/), mirroring convolve_sensor_response.py.
+Only convolved files belonging to that run are discovered (file-name patterns
+pinned to run_name).  Convolved products on the 8461-channel observation grid
+(645-2760 cm^-1, 0.25 cm^-1 spacing) are compared exactly; products on a
+finer simulation frequency grid (e.g. the merged SLURM run, 0.02 cm^-1
+spacing) are collocated to the observation grid by nearest simulation
+channel - an offset of at most half the simulation grid spacing, far below
+the SRF width.  Files that carry only brightness_temperature (convolve run
+with export_convolved_radiance = False) are compared in brightness
+temperature only; radiance quantities are skipped.  All chunks carry the
+global column index (idx 0-19705), so columns match the observations exactly.
 
 Environment (mamba/conda):    pyarts
                               (same as convolve_sensor_response.py)
 
 Input data:
     data/satdata.nc                                   (observed T_b)
-    results/RADIANCE/**/Reference_convolved_Nf42301_*_chunk*.nc
-    results/RADIANCE/**/Reference_convolved_Nf109000_*_chunk*.nc
-    (the setup patterns are searched recursively, so the per-run sub folders
-    results/RADIANCE/<run_name>/ are included)
+    results/RADIANCE/<run_name>/Reference_convolved_*.nc
+    (searched recursively within the run sub folder, file names pinned to
+    run_name)
 
 Output:
-    results/COMPARISON/comparison_stats_<setup>.nc    aggregate statistics
-    plot/comparison/fig_<...>_<setup>.png / .pdf      figures
+    results/COMPARISON/comparison_stats_<run_name>.nc  aggregate statistics
+    plot/comparison/fig_<...>_<run_name>.png / .pdf    figures
 
 Example
 -------
-Simply run the script; it discovers all convolved chunks automatically.
+Set the run_name constant to the run sub folder to compare, then run the
+script; it discovers the run's convolved chunks automatically.
 
     $ python compare_convolved_with_obs.py
 
 Notes
 -----
+* All statistics and histograms are computed on the observation channel grid;
+  chunk arrays on a finer simulation grid are collocated to it (nearest
+  simulation channel) before the streaming accumulation starts.
 * The observed T_b fields contain fill values (-777); they are masked via the
   valid-range check (bt_valid_range) and excluded from all statistics.
 * Processing runs in two streaming passes over the chunks per setup: pass 1
@@ -68,6 +77,7 @@ Notes
 import time
 import pathlib
 import glob
+import re
 
 import numpy as np
 import xarray as xr
@@ -88,22 +98,23 @@ from matplotlib.colors import LogNorm
 # Location of this script
 script_dir = pathlib.Path(__file__).parent.resolve()
 data_dir = script_dir.parent / "data"
-results_folder = script_dir.parent / "results" / "RADIANCE"
+results_root = script_dir.parent / "results" / "RADIANCE"
 stats_folder = script_dir.parent / "results" / "COMPARISON"
 plot_folder = script_dir.parent / "plot" / "comparison"
+
+# run sub folder of results/RADIANCE/ to compare against the observations
+# (run_name = <setup_name>_Nf<N_wvn>_Nza<N_za>, same constant as in
+# convolve_sensor_response.py; only that run's convolved files are used)
+run_name = "fmip_radiance_batch_slurm_Nf108951_Nza20"
+results_folder = results_root / run_name
 
 # Input data files
 satdata_file = data_dir / "satdata.nc"
 
-# Simulation setups to compare (file pattern within results_folder, tag used
-# in output file names). The convolved products of both setups live on the
-# observation channel grid.
-setups = [   
-    {"tag": "Nf109000",
-     "pattern": "Reference_convolved_Nf109000_Nza20_fmip_radiance_batch_chunk*.nc"},
-    {"tag": "Nf42301",
-     "pattern": "Reference_convolved_Nf42301_Nza20_Naa1_chunk*.nc"}
-]
+# Collocation tolerance [cm^-1]: maximum distance of the nearest simulation
+# grid point to an observation channel centre (grid-coarser-than-obs grids
+# are rejected by this check; exact or finer grids pass trivially)
+collocation_tol_cm = 0.125
 
 # Observed T_b validity: values outside this range are treated as fill values
 # (satdata.nc uses -777 as fill value)
@@ -182,24 +193,89 @@ def planck_frequency(nu, T):
         return c2_nu / np.expm1(h_nu / (k_B * T))
 
 
-def discover_convolved_chunks(results_folder, pattern):
+def discover_convolved_chunks(results_folder, run_name):
     """
-    Sorted list of convolved chunk NetCDF files matching pattern.
+    Sorted list of convolved chunk NetCDF files of one run, pinned to run_name.
 
-    The search is recursive, so the per-run sub folders of results/RADIANCE/
-    (results/RADIANCE/<run_name>/) are included.
+    The search covers the run sub folder selected by the run_name constant
+    (results/RADIANCE/<run_name>/) recursively; only files whose names belong
+    to run_name are returned.  convolve_sensor_response.py mirrors the input
+    radiance names (radiance_TOA -> convolved), so this run's convolved files
+    either contain the full run_name (merged runs,
+    Reference_convolved_merged_<run_name>_...) or the setup-name part plus
+    the _Nf<..>_/ _Nza<..>_ tags of run_name (
+    Reference_convolved_Nf*_Nza*_<setup_name>_...).
     """
-    files = sorted(glob.glob(str(results_folder / "**" / pattern),
-                             recursive=True))
-    return [pathlib.Path(f) for f in files]
+    # parse run_name = <setup_name>_Nf<N_wvn>_Nza<N_za>
+    # (fall back to matching only the full run_name if the layout differs)
+    match = re.match(r"(.+)_Nf(\d+)_Nza(\d+)$", run_name)
+    if match:
+        setup_name, nf_tag, nza_tag = (
+            match.group(1), f"_Nf{match.group(2)}_", f"_Nza{match.group(3)}_"
+        )
+    else:
+        setup_name, nf_tag, nza_tag = run_name, None, None
+
+    pattern = str(results_folder / "**" / "Reference_convolved_*.nc")
+    files = [
+        pathlib.Path(f)
+        for f in glob.glob(pattern, recursive=True)
+        if setup_name in pathlib.Path(f).name
+        and (nf_tag is None or nf_tag in pathlib.Path(f).name)
+        and (nza_tag is None or nza_tag in pathlib.Path(f).name)
+    ]
+    return sorted(files)
+
+
+def collocation_indices(sim_wvn, wvn_obs, tol_cm):
+    """
+    Index of the nearest simulation grid point for each observation channel.
+
+    Grids that already match return exact indices (zero distance).
+
+    Parameters
+    ----------
+    sim_wvn, wvn_obs : ndarray
+        Simulation and observation wavenumber grids [cm^-1], ascending.
+    tol_cm : float
+        Maximum allowed distance of the nearest simulation point to an
+        observation channel centre.
+
+    Returns
+    -------
+    ndarray
+        Index into sim_wvn for each observation channel.
+    """
+    pos = np.clip(np.searchsorted(sim_wvn, wvn_obs), 1, sim_wvn.size - 1)
+    left, right = pos - 1, pos
+    sel = np.where(np.abs(sim_wvn[left] - wvn_obs)
+                   <= np.abs(sim_wvn[right] - wvn_obs), left, right)
+    dist = np.abs(sim_wvn[sel] - wvn_obs)
+    if dist.max() > tol_cm:
+        raise ValueError(
+            f"simulation wavenumber grid too coarse/misaligned: observation "
+            f"channel {wvn_obs[int(dist.argmax())]:.2f} cm^-1 is "
+            f"{dist.max():.3f} cm^-1 from the nearest simulation point "
+            f"(tolerance {tol_cm} cm^-1)."
+        )
+    return sel
 
 
 def extract_chunk_arrays(convolved_ds):
-    """Load the (frequency, idx) arrays of one convolved chunk."""
+    """
+    Load the (frequency, idx) arrays of one convolved chunk.
+
+    spectral_radiance_convolved is optional (runs convolved with
+    export_convolved_radiance = False carry only brightness_temperature);
+    radiance is None in that case.
+    """
     wvn = convolved_ds.coords["wavenumber"].values
     freq = convolved_ds.coords["frequency"].values
     idx = convolved_ds.coords["idx"].values
-    radiance = convolved_ds["spectral_radiance_convolved"].values
+    if "spectral_radiance_convolved" in convolved_ds:
+        radiance = convolved_ds["spectral_radiance_convolved"].values
+    else:
+        radiance = None
     bt = convolved_ds["brightness_temperature"].values
     return wvn, freq, idx, radiance, bt
 
@@ -216,12 +292,20 @@ def compute_differences(sim_radiance, sim_bt, obs_tb, freq):
     d_rad, d_rel, d_bt : ndarray, shape (N_wvn, N_idx)
         Absolute radiance difference [W m^-2 Hz^-1 sr^-1],
         relative radiance difference [%], brightness temperature difference [K].
+        d_rad and d_rel are None if sim_radiance is None (BT-only run).
     """
     with np.errstate(invalid="ignore"):
         obs_valid = (obs_tb > bt_valid_range[0]) & (obs_tb < bt_valid_range[1])
 
     # obs radiance from the observed brightness temperature
     obs_tb_safe = np.where(obs_valid, obs_tb, np.nan)
+
+    if sim_radiance is None:
+        valid = obs_valid & np.isfinite(sim_bt)
+        d_bt = sim_bt - obs_tb_safe
+        d_bt = np.where(~valid, np.nan, d_bt)
+        return None, None, d_bt
+
     obs_radiance = planck_frequency(freq, obs_tb_safe)
 
     valid = obs_valid & np.isfinite(sim_radiance) & np.isfinite(sim_bt)
@@ -363,23 +447,28 @@ def plot_histogram_pcolormesh(wvn, bin_centers, density, ylabel, quantity_label,
 
 def run_comparison(chunk_files, obs_Tb_values, wvn_obs, tag):
     """
-    Run the streaming comparison for one simulation setup.
+    Run the streaming comparison for one simulation run.
+
+    Chunk arrays are collocated to the observation channel grid; radiance
+    quantities are only computed if the chunks carry spectral_radiance_convolved.
 
     Returns
     -------
-    dict with per-quantity mean/std/rmse/density arrays, histogram counts,
-    bin edges, and per-wavenumber valid column counts.
+    dict with the compared quantities (quantities), per-quantity
+    mean/std/rmse/density arrays, histogram counts, bin edges, and
+    per-wavenumber valid column counts.
     """
     print("\n" + "=" * 70)
-    print(f"Setup {tag}: {len(chunk_files)} convolved chunk(s)")
+    print(f"Run {tag}: {len(chunk_files)} convolved chunk(s)")
     print("=" * 70)
 
-    quantities = ("rad", "rel", "bt")
-    counts = {q: None for q in quantities}
-    sums = {q: None for q in quantities}
-    sum_sqs = {q: None for q in quantities}
+    counts = {}
+    sums = {}
+    sum_sqs = {}
     d_rad_samples = []
-    n_wvn = None
+    quantities = None
+    sel = None
+    wvn_ref = None
 
     # Pass 1: running statistics + subsample for the radiance hist range
     print("  Pass 1: accumulating mean / std / RMSE statistics...")
@@ -388,54 +477,79 @@ def run_comparison(chunk_files, obs_Tb_values, wvn_obs, tag):
         wvn, freq, idx, sim_rad, sim_bt = extract_chunk_arrays(ds)
         ds.close()
 
-        if n_wvn is None:
-            n_wvn = wvn.size
-            if not np.allclose(wvn, wvn_obs):
-                raise ValueError(
-                    f"{tag}: simulation and observation wavenumber grids do "
-                    f"not match."
-                )
+        if quantities is None:
+            # grid alignment / collocation is set from the first chunk
+            wvn_ref = wvn
+            sel = collocation_indices(wvn, wvn_obs, collocation_tol_cm)
+            if np.array_equal(wvn[sel], wvn_obs):
+                print("  Simulation grid matches the observation grid exactly.")
+            else:
+                print(f"  Collocating simulation grid ({wvn.size} points) to "
+                      f"the observation grid ({wvn_obs.size} channels): "
+                      f"max offset "
+                      f"{np.abs(wvn[sel] - wvn_obs).max():.4f} cm^-1")
+            quantities = ("rad", "rel", "bt") if sim_rad is not None else ("bt",)
+            if sim_rad is None:
+                print("  No spectral_radiance_convolved in the chunks: "
+                      "comparing brightness temperature only.")
             for q in quantities:
-                counts[q] = np.zeros(n_wvn, dtype=np.int64)
-                sums[q] = np.zeros(n_wvn)
-                sum_sqs[q] = np.zeros(n_wvn)
-        elif not np.array_equal(wvn, wvn_obs):
+                counts[q] = np.zeros(wvn_obs.size, dtype=np.int64)
+                sums[q] = np.zeros(wvn_obs.size)
+                sum_sqs[q] = np.zeros(wvn_obs.size)
+        elif not np.array_equal(wvn, wvn_ref):
             raise ValueError(f"{tag}: wavenumber grid mismatch in "
                              f"{chunk_file.name}")
 
+        wvn_c = wvn[sel]
+        freq_c = freq[sel]
+        if sim_rad is not None:
+            sim_rad = sim_rad[sel, :]
+        sim_bt = sim_bt[sel, :]
+
         obs_tb = obs_Tb_values[idx, :]  # (N_idx, N_wvn)
-        d_rad, d_rel, d_bt = compute_differences(sim_rad, sim_bt, obs_tb.T, freq)
+        d_rad, d_rel, d_bt = compute_differences(sim_rad, sim_bt, obs_tb.T, freq_c)
 
-        for q, d in zip(quantities, (d_rad, d_rel, d_bt)):
-            accumulate_stats(counts[q], sums[q], sum_sqs[q], d)
+        diffs = {"bt": d_bt}
+        if d_rad is not None:
+            diffs["rad"] = d_rad
+            diffs["rel"] = d_rel
+        for q in quantities:
+            accumulate_stats(counts[q], sums[q], sum_sqs[q], diffs[q])
 
-        d_rad_samples.append(
-            d_rad[:, ::sample_column_stride].ravel().astype(np.float32)
-        )
+        if d_rad is not None:
+            d_rad_samples.append(
+                d_rad[:, ::sample_column_stride].ravel().astype(np.float32)
+            )
 
         print(f"    chunk {ck + 1}/{len(chunk_files)}: idx {idx.min()}–"
-              f"{idx.max()}, {d_rad.shape[1]} columns")
+              f"{idx.max()}, {d_bt.shape[1]} columns")
 
-    print(f"  Total columns compared: {counts['rad'].sum()}")
+    print(f"  Total columns compared: {counts['bt'].sum()}")
 
     # Histogram bin configuration
-    d_rad_all = np.concatenate(d_rad_samples)
-    d_rad_all = d_rad_all[np.isfinite(d_rad_all)]
-    if abs_hist_range is None:
-        p = np.percentile(np.abs(d_rad_all), abs_hist_percentile)
-        rad_range = (-p, p)
-        print(f"  Auto radiance histogram range (P{abs_hist_percentile:g} of "
-              f"|diff|): ±{p:.3e} W m^-2 Hz^-1 sr^-1")
+    if "rad" in quantities:
+        d_rad_all = np.concatenate(d_rad_samples)
+        d_rad_all = d_rad_all[np.isfinite(d_rad_all)]
+        if abs_hist_range is None:
+            p = np.percentile(np.abs(d_rad_all), abs_hist_percentile)
+            rad_range = (-p, p)
+            print(f"  Auto radiance histogram range (P{abs_hist_percentile:g} of "
+                  f"|diff|): ±{p:.3e} W m^-2 Hz^-1 sr^-1")
+        else:
+            rad_range = abs_hist_range
+        del d_rad_all, d_rad_samples
     else:
-        rad_range = abs_hist_range
-    del d_rad_all, d_rad_samples
+        rad_range = (0.0, 1.0)  # unused
 
     bin_configs = {
-        "rad": np.linspace(rad_range[0], rad_range[1], hist_n_bins + 1),
-        "rel": np.linspace(rel_hist_range[0], rel_hist_range[1], hist_n_bins + 1),
         "bt": np.linspace(bt_hist_range[0], bt_hist_range[1], hist_n_bins + 1),
     }
-    hists = {q: np.zeros((n_wvn, hist_n_bins), dtype=np.int64)
+    if "rad" in quantities:
+        bin_configs["rad"] = np.linspace(rad_range[0], rad_range[1],
+                                         hist_n_bins + 1)
+        bin_configs["rel"] = np.linspace(rel_hist_range[0], rel_hist_range[1],
+                                         hist_n_bins + 1)
+    hists = {q: np.zeros((wvn_obs.size, hist_n_bins), dtype=np.int64)
              for q in quantities}
 
     # Pass 2: per-wavenumber histogram accumulation
@@ -445,17 +559,26 @@ def run_comparison(chunk_files, obs_Tb_values, wvn_obs, tag):
         wvn, freq, idx, sim_rad, sim_bt = extract_chunk_arrays(ds)
         ds.close()
 
-        obs_tb = obs_Tb_values[idx, :]
-        d_rad, d_rel, d_bt = compute_differences(sim_rad, sim_bt, obs_tb.T, freq)
+        freq_c = freq[sel]
+        if sim_rad is not None:
+            sim_rad = sim_rad[sel, :]
+        sim_bt = sim_bt[sel, :]
 
-        for q, d in zip(quantities, (d_rad, d_rel, d_bt)):
-            accumulate_histogram(hists[q], bin_configs[q], d)
+        obs_tb = obs_Tb_values[idx, :]
+        d_rad, d_rel, d_bt = compute_differences(sim_rad, sim_bt, obs_tb.T, freq_c)
+
+        diffs = {"bt": d_bt}
+        if d_rad is not None:
+            diffs["rad"] = d_rad
+            diffs["rel"] = d_rel
+        for q in quantities:
+            accumulate_histogram(hists[q], bin_configs[q], diffs[q])
 
         print(f"    chunk {ck + 1}/{len(chunk_files)} done")
 
     # Finalize statistics
-    stats = {"tag": tag, "bins": bin_configs, "hist": hists,
-             "n_columns": counts["bt"]}
+    stats = {"tag": tag, "quantities": quantities, "bins": bin_configs,
+             "hist": hists, "n_columns": counts["bt"]}
     for q in quantities:
         mean, std, rmse = finalize_stats(counts[q], sums[q], sum_sqs[q])
         stats[q] = {
@@ -468,8 +591,8 @@ def run_comparison(chunk_files, obs_Tb_values, wvn_obs, tag):
 
 
 def export_stats(stats, wvn_obs, out_file):
-    """Write the aggregate statistics of one setup to NetCDF."""
-    quantities = ("rad", "rel", "bt")
+    """Write the aggregate statistics of one run to NetCDF."""
+    quantities = stats["quantities"]
     units = {"rad": "W m^-2 Hz^-1 sr^-1", "rel": "%", "bt": "K"}
     names = {"rad": "radiance", "rel": "radiance_rel", "bt": "bt"}
 
@@ -508,23 +631,27 @@ def export_stats(stats, wvn_obs, out_file):
 
 
 def make_setup_plots(stats, wvn_obs):
-    """Create the stats and histogram figures of one setup."""
+    """Create the stats and histogram figures of one run (per compared quantity)."""
     bin_centers = {q: 0.5 * (stats["bins"][q][:-1] + stats["bins"][q][1:])
-                   for q in ("rad", "rel", "bt")}
+                   for q in stats["quantities"]}
     tag = stats["tag"]
 
-    plot_stats_vs_wvn(
-        wvn_obs, stats["rad"]["mean"], stats["rad"]["std"], stats["rad"]["rmse"],
-        "W m$^{-2}$ Hz$^{-1}$ sr$^{-1}$",
-        "Spectral radiance difference (absolute)",
-        plot_folder / f"fig_radiance_abs_stats_{tag}",
-    )
-    plot_stats_vs_wvn(
-        wvn_obs, stats["rel"]["mean"], stats["rel"]["std"], stats["rel"]["rmse"],
-        "%",
-        "Spectral radiance difference (relative to observation)",
-        plot_folder / f"fig_radiance_rel_stats_{tag}",
-    )
+    if "rad" in stats["quantities"]:
+        plot_stats_vs_wvn(
+            wvn_obs, stats["rad"]["mean"], stats["rad"]["std"],
+            stats["rad"]["rmse"],
+            "W m$^{-2}$ Hz$^{-1}$ sr$^{-1}$",
+            "Spectral radiance difference (absolute)",
+            plot_folder / f"fig_radiance_abs_stats_{tag}",
+        )
+        plot_stats_vs_wvn(
+            wvn_obs, stats["rel"]["mean"], stats["rel"]["std"],
+            stats["rel"]["rmse"],
+            "%",
+            "Spectral radiance difference (relative to observation)",
+            plot_folder / f"fig_radiance_rel_stats_{tag}",
+        )
+
     plot_stats_vs_wvn(
         wvn_obs, stats["bt"]["mean"], stats["bt"]["std"], stats["bt"]["rmse"],
         "K",
@@ -532,18 +659,20 @@ def make_setup_plots(stats, wvn_obs):
         plot_folder / f"fig_bt_stats_{tag}",
     )
 
-    plot_histogram_pcolormesh(
-        wvn_obs, bin_centers["rad"], stats["rad"]["density"],
-        "Difference [W m$^{-2}$ Hz$^{-1}$ sr$^{-1}$]",
-        "Radiance difference distribution (absolute, sim − obs)",
-        plot_folder / f"fig_radiance_abs_hist_{tag}",
-    )
-    plot_histogram_pcolormesh(
-        wvn_obs, bin_centers["rel"], stats["rel"]["density"],
-        "Difference [%]",
-        "Radiance difference distribution (relative, sim − obs)",
-        plot_folder / f"fig_radiance_rel_hist_{tag}",
-    )
+    if "rad" in stats["quantities"]:
+        plot_histogram_pcolormesh(
+            wvn_obs, bin_centers["rad"], stats["rad"]["density"],
+            "Difference [W m$^{-2}$ Hz$^{-1}$ sr$^{-1}$]",
+            "Radiance difference distribution (absolute, sim − obs)",
+            plot_folder / f"fig_radiance_abs_hist_{tag}",
+        )
+        plot_histogram_pcolormesh(
+            wvn_obs, bin_centers["rel"], stats["rel"]["density"],
+            "Difference [%]",
+            "Radiance difference distribution (relative, sim − obs)",
+            plot_folder / f"fig_radiance_rel_hist_{tag}",
+        )
+
     plot_histogram_pcolormesh(
         wvn_obs, bin_centers["bt"], stats["bt"]["density"],
         "Difference [K]",
@@ -581,26 +710,34 @@ def main():
     obs_Tb_values = obs_Tb.values.astype(np.float32)  # (idx, wvn)
 
     # -------------------------------------------------------------------------
-    # Compare each setup separately
+    # Discover and compare the convolved chunks of the selected run
     # -------------------------------------------------------------------------
-    for setup in setups:
-        chunk_files = discover_convolved_chunks(results_folder,
-                                                setup["pattern"])
-        if not chunk_files:
-            print(f"\nWARNING: no convolved files matching "
-                  f"'{setup['pattern']}' in {results_folder} - skipped.")
-            continue
+    if not results_folder.is_dir():
+        available = sorted(
+            p.name for p in results_root.iterdir() if p.is_dir()
+        ) if results_root.is_dir() else []
+        raise FileNotFoundError(
+            f"Run sub folder {results_folder} does not exist. "
+            f"Set run_name to one of the available runs: "
+            f"{', '.join(available) if available else '(none)'}"
+        )
+    chunk_files = discover_convolved_chunks(results_folder, run_name)
+    if not chunk_files:
+        raise FileNotFoundError(
+            f"No convolved output files (Reference_convolved_* belonging to "
+            f"'{run_name}') found in {results_folder}. "
+            f"Run convolve_sensor_response.py first."
+        )
 
-        stats = run_comparison(chunk_files, obs_Tb_values, wvn_obs,
-                               setup["tag"])
+    stats = run_comparison(chunk_files, obs_Tb_values, wvn_obs, run_name)
 
-        if export_stats:
-            export_stats(stats, wvn_obs,
-                         stats_folder / f"comparison_stats_{setup['tag']}.nc")
+    if export_stats:
+        export_stats(stats, wvn_obs,
+                     stats_folder / f"comparison_stats_{run_name}.nc")
 
-        if make_plots:
-            make_setup_plots(stats, wvn_obs)
-            print(f"  Figures written to {plot_folder}")
+    if make_plots:
+        make_setup_plots(stats, wvn_obs)
+        print(f"  Figures written to {plot_folder}")
 
     satdata.close()
 
