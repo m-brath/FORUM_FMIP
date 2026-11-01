@@ -20,6 +20,9 @@ Input data: Spectral radiance chunks from fmip_radiance_batch.py /
 fmip_radiance_slurm_sub.py in the run sub folder selected by the run_name
 constant, results/RADIANCE/<run_name>/:
     Reference_radiance_TOA_Nf*.nc  (one file per chunk)
+    If the chunk files are no longer present (e.g. they were removed after
+    merge_radiance_chunks.py ran with delete_chunk_files = True), the merged
+    files Reference_radiance_TOA_merged_*.nc are used instead.
     data/sensor_response.nc  (SRF wavenumber offsets and response)
 
 Output:
@@ -59,6 +62,7 @@ Notes
 import time
 import pathlib
 import glob
+import re
 
 import numpy as np
 import xarray as xr
@@ -76,7 +80,7 @@ data_dir = script_dir.parent / "data"
 
 # run sub folder of results/RADIANCE/ written by one launch
 # (run_name = <setup_name>_Nf<N_wvn>_Nza<N_za>)
-run_name = "fmip_radiance_batch_Nf109000_Nza20"
+run_name = "fmip_radiance_batch_slurm_Nf108951_Nza20"
 results_folder = script_dir.parent / "results" / "RADIANCE" / run_name
 
 # Input data files
@@ -89,7 +93,9 @@ include_full_field = False
 
 # Output options
 export_results = True
-export_convolved_radiance = True  # save the convolved radiance
+export_convolved_radiance = False  # save the convolved radiance
+# (kept False for the 16 GB slurm run: both exports would need ~32-35 GB
+# and the local disk only has ~35 GB free; set back to True if needed)
 export_brightness_temperature = True  # save the brightness temperature
 
 
@@ -97,29 +103,70 @@ export_brightness_temperature = True  # save the brightness temperature
 # %% helpers
 # =============================================================================
 
-def discover_radiance_chunks(results_folder):
+def discover_radiance_chunks(results_folder, run_name):
     """
-    Discover all radiance output files matching the fmip_radiance_batch pattern.
+    Discover all radiance output files of one run, pinned to run_name.
 
     The search covers the run sub folder selected by the run_name constant
     (results/RADIANCE/<run_name>/); the recursive glob also picks up any
-    files in nested sub folders.
+    files in nested sub folders.  Only files whose names belong to
+    run_name are processed:
+
+    * Unmerged chunk/non-chunked files (pattern Reference_radiance_TOA_Nf*.nc)
+      must contain the setup-name part of run_name plus its _Nf<..>_/ _Nza<..>_
+      tags.  run_name is <setup_name>_Nf<N_wvn>_Nza<N_za>, but the file names
+      put the Nf/Nza tags first (Reference_radiance_TOA_Nf*_Nza*_<setup_name>_
+      ...), so the parts are extracted from run_name and matched separately.
+    * If no unmerged files are found -- e.g. a SLURM run whose chunk files
+      were deleted after merge_radiance_chunks.py ran with
+      delete_chunk_files = True -- falls back to the merged files, whose
+      names are Reference_radiance_TOA_merged_<run_name>[_chunk###].nc,
+      matched by the full run_name.  Merged files hold the same variables
+      and coordinates as the chunk files.
+
+    Preferring unmerged over merged files avoids processing the same
+    frequencies twice when both kinds of files are present.
 
     Parameters
     ----------
     results_folder : pathlib.Path
         Path to the run sub folder results/RADIANCE/<run_name>/.
+    run_name : str
+        Run identifier (<setup_name>_Nf<N_wvn>_Nza<N_za>) used to pin the
+        file name patterns to this run.
 
     Returns
     -------
     list of pathlib.Path
-        Sorted list of NetCDF files matching the pattern
-        Reference_radiance_TOA_Nf*.nc (chunks and non-chunked; merged files
-        are excluded by the pattern).
+        Sorted list of NetCDF files matching the chunk pattern
+        Reference_radiance_TOA_Nf*.nc for this run, or the merged pattern
+        Reference_radiance_TOA_merged_<run_name>*.nc as fallback.
     """
+    # parse run_name = <setup_name>_Nf<N_wvn>_Nza<N_za>
+    # (fall back to matching only the full run_name if the layout differs)
+    match = re.match(r"(.+)_Nf(\d+)_Nza(\d+)$", run_name)
+    if match:
+        setup_name, nf_tag, nza_tag = (
+            match.group(1), f"_Nf{match.group(2)}_", f"_Nza{match.group(3)}_"
+        )
+    else:
+        setup_name, nf_tag, nza_tag = run_name, None, None
+
     pattern = str(results_folder / "**" / "Reference_radiance_TOA_Nf*.nc")
-    files = sorted(glob.glob(pattern, recursive=True))
-    return [pathlib.Path(f) for f in files]
+    files = [
+        pathlib.Path(f)
+        for f in glob.glob(pattern, recursive=True)
+        if setup_name in pathlib.Path(f).name
+        and (nf_tag is None or nf_tag in pathlib.Path(f).name)
+        and (nza_tag is None or nza_tag in pathlib.Path(f).name)
+    ]
+    if not files:
+        merged_pattern = str(
+            results_folder / "**"
+            / f"Reference_radiance_TOA_merged_{run_name}*.nc"
+        )
+        files = [pathlib.Path(f) for f in glob.glob(merged_pattern, recursive=True)]
+    return sorted(files)
 
 
 def validate_and_normalize_srf(srf_wvn, srf_response):
@@ -205,12 +252,13 @@ def main():
             f"Set run_name to one of the available runs: "
             f"{', '.join(available) if available else '(none)'}"
         )
-    radiance_files = discover_radiance_chunks(results_folder)
+    radiance_files = discover_radiance_chunks(results_folder, run_name)
 
     if not radiance_files:
         raise FileNotFoundError(
-            f"No radiance output files found in {results_folder}. "
-            f"Run fmip_radiance_batch.py first."
+            f"No radiance output files (Reference_radiance_TOA_Nf*.nc or "
+            f"Reference_radiance_TOA_merged_*.nc) found in {results_folder}. "
+            f"Run fmip_radiance_batch.py / fmip_radiance_slurm_main.py first."
         )
 
     print(f"  Found {len(radiance_files)} radiance chunk(s):")
