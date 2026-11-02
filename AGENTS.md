@@ -49,9 +49,9 @@ and `test.py` were removed) — do not introduce it.
 | `fmip_radiance_slurm_main.py` | Entry point for chunked radiance runs: writes JSON configs (`configs/<run_name>/`) and dispatches one job per frequency chunk to `fmip_radiance_slurm_sub.py` |
 | `fmip_radiance_slurm_sub.py` | Worker for ONE frequency chunk — run ONLY via the launcher (`argv[1]` = config JSON) |
 | `merge_radiance_chunks.py` | Frequency-chunk files → `Reference_radiance_TOA_merged_*.nc` in the same run folder; terminal (nothing downstream reads merged files); run constants are `run_name` and `delete_chunk_files` (opt-in removal of the chunk inputs after a successful merge) |
-| `convolve_sensor_response.py` | `results/RADIANCE/<run_name>/Reference_radiance_TOA_Nf*.nc` (falls back to `Reference_radiance_TOA_merged_*.nc` if the chunk files were deleted after merging) → `Reference_convolved_*` in the same run folder; run constant is `run_name` |
-| `convolve_sensor_response_bt.py` | Alternative diagnostic of the above: Planck-inverts the full-resolution radiance first, then applies the SRF as a weighted average in BT space → `Reference_BTconvolved_*` (float32) in the same run folder; run constant is `run_name`; not picked up by `compare_convolved_with_obs.py` |
-| `compare_convolved_with_obs.py` | `results/RADIANCE/<run_name>/Reference_convolved_*` + `data/satdata.nc` → stats/histograms in `results/COMPARISON/`; runs after `convolve_sensor_response.py`; run constant is `run_name`, colocates sim-grid products to the observation channel grid and handles BT-only convolved files |
+| `convolve_sensor_response.py` | `results/RADIANCE/<run_name>/Reference_radiance_TOA_Nf*.nc` (falls back to `Reference_radiance_TOA_merged_*.nc` if the chunk files were deleted after merging) → `Reference_convolved_*` in the same run folder; outputs are on the IASI channel grid (8461 channels, centres from `data/satdata.nc`); run constant is `run_name` |
+| `convolve_sensor_response_bt.py` | Alternative diagnostic of the above: Planck-inverts the full-resolution radiance first, then applies the SRF as a weighted average in BT space → `Reference_BTconvolved_*` (float32, IASI channel grid; the optional monochromatic diagnostic keeps the sim grid on its own `frequency_sim` axis) in the same run folder; run constant is `run_name`; not picked up by `compare_convolved_with_obs.py` |
+| `compare_convolved_with_obs.py` | `results/RADIANCE/<run_name>/Reference_convolved_*` + `data/satdata.nc` → stats/histograms in `results/COMPARISON/`; runs after `convolve_sensor_response.py`; run constant is `run_name`, compares exactly on the shared IASI channel grid (nearest-channel collocation only for legacy sim-grid products) and handles BT-only convolved files |
 | `compare_btconvolved_with_obs.py` | Companion of `convolve_sensor_response_bt.py`: compares `Reference_BTconvolved_*` against `data/satdata.nc` by importing `compare_convolved_with_obs` (unmodified) and reusing its comparison machinery; outputs are tagged `<run_name>_BTconvolved` so the standard comparison stats/figures are never touched; run constants are `run_name` and `tag` |
 | `plot_lut_species_crosssections.py` | Optional diagnostic for the T_B comparison: reads `cache/<setup>/LUT.xml` + `data/atmdata.nc`; needs `ARTS_DATA_PATH`; no downstream consumer |
 | `frtmip_aux_functions.py` | Library, never run — shared helpers imported by `prepare_data.py`, `fmip_radiance_batch.py`, `convolve_sensor_response.py` |
@@ -91,6 +91,17 @@ and `test.py` were removed) — do not introduce it.
   Changing `N_wvn` or `freq_per_chunk` changes the identifiers → new cache
   dirs. The sub-scripts pin their cwd to `scripts/` so the cache location is
   identical on levante and locally.
+- **SRF convolution runs on the sensor grid**: `convolve_sensor_response.py` /
+  `convolve_sensor_response_bt.py` evaluate the SRF as a unit-sum weighted
+  average directly at the IASI channel centres (channel grid = `wvn` of
+  `data/satdata.nc`), using the sparse weight operator from
+  `frtmip_aux_functions.build_srf_channel_operator` (built once per run from
+  the first input file's frequency grid) — the products therefore carry
+  8461 channels instead of the simulation grid (~135 MB vs ~1.7 GB per
+  variable and 2000-column chunk).  The SRF needs the full spectrum around a
+  channel, so frequency-chunk files must be merged first and runs need
+  `include_sensor_response = True`; channels whose SRF support is not covered
+  by the input grid are dropped with a warning.
 - **Level ordering differs by file**: `atmdata.nc` is TOA-first, but radiance
   arrays returned by the batch calls are surface-first (index 0 = SFC, last =
   TOA). The TOA slice is `radiance[i][:, -1, :, :]`.

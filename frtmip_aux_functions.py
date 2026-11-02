@@ -762,6 +762,10 @@ def convolve_with_srf(spectral_radiance, f_grid, srf_wvn, srf_response):
       extends the simulation range by the SRF width
       (include_sensor_response=True), so the satellite range itself is
       unaffected.
+    * This variant keeps the simulation frequency grid.  The sensor-response
+      products of the pipeline are written on the sensor channel grid instead
+      and evaluate the same filter at the channel centres -- see
+      build_srf_channel_operator / convolve_with_srf_to_channels.
     """
     from scipy.interpolate import interp1d
     from scipy.ndimage import convolve1d
@@ -796,6 +800,173 @@ def convolve_with_srf(spectral_radiance, f_grid, srf_wvn, srf_response):
         np.asarray(spectral_radiance, dtype=float),
         weights, axis=0, mode='constant', cval=0.0,
     )
+
+
+def build_srf_channel_operator(f_grid, srf_wvn, srf_response, channel_wvn):
+    """
+    Sparse SRF weighting operator mapping spectra onto sensor channel centres.
+
+    Each row of the operator is one sensor channel: the SRF sampled over its
+    support around that channel centre, used as quadrature weights and
+    renormalized to unit sum.  Applying the operator to a spectrum on the
+    (finer) simulation grid therefore evaluates the instrument response
+
+        L_channel = sum_i SRF(wvn_i - wvn_channel) * L(wvn_i)
+                    / sum_i SRF(wvn_i - wvn_channel)
+
+    directly at the channel centres -- i.e. the result carries the spectral
+    resolution of the instrument (its channel grid), not the simulation grid.
+    This is the discrete equivalent of convolve_with_srf, but evaluated only at
+    the channel centres instead of at every simulation grid point (which is
+    both more accurate -- no resampling of the already smoothed spectrum -- and
+    much cheaper, because only the channel centres are computed).
+
+    Parameters
+    ----------
+    f_grid : ndarray, shape (N_wvn,)
+        Simulation frequency grid [Hz], ascending and (nearly) uniform in
+        wavenumber, as built by np.linspace in the batch scripts.
+    srf_wvn : ndarray, shape (N_srf,)
+        SRF wavenumber offsets [cm^-1] relative to channel centre.
+    srf_response : ndarray, shape (N_srf,)
+        SRF response values (non-negative main lobe, possibly small negative
+        sidelobes).
+    channel_wvn : ndarray, shape (N_channels_all,)
+        Sensor channel centres [cm^-1] (e.g. the IASI channel grid).
+
+    Returns
+    -------
+    operator : scipy.sparse.csr_matrix, shape (N_channels, N_wvn)
+        Unit-sum row weighting operator.
+    channels : ndarray, shape (N_channels,)
+        Channel centres [cm^-1] the operator rows refer to.  Channels whose SRF
+        support is not fully inside f_grid are dropped (they would be computed
+        with a truncated SRF), so N_channels <= N_channels_all.
+
+    Notes
+    -----
+    * Requires the full simulation spectrum around every channel, i.e. the
+      input grid must cover [channel - SRF_max, channel + SRF_max].  The batch
+      runs do this (include_sensor_response=True extends the range by the SRF
+      extent); frequency-chunk files of a SLURM run do NOT (they hold a short
+      slice of the spectrum), which is why they must be merged before the SRF
+      is applied.
+    * When the simulation and channel grids are commensurate (e.g. 0.02 cm^-1
+      simulation grid, 0.25 cm^-1 IASI channels, SRF given on a 0.01 cm^-1
+      offset grid) the SRF is sampled exactly at its tabulated offsets;
+      otherwise linear interpolation between the tabulated offsets is used.
+    """
+    import scipy.sparse as sp
+
+    # Convert frequency grid to wavenumber (wvn [cm^-1] = f [Hz] / (c * 100))
+    wvn_grid = np.asarray(f_grid, dtype=float) / (scc.c * 100.0)
+    if not np.all(np.diff(wvn_grid) > 0):
+        raise ValueError("build_srf_channel_operator requires an ascending grid")
+    dwvn = np.diff(wvn_grid)
+    if not np.allclose(dwvn, dwvn[0], rtol=1e-6):
+        raise ValueError("build_srf_channel_operator requires a uniform "
+                         "wavenumber grid")
+    dwvn = abs(float(np.mean(dwvn)))
+
+    srf_order = np.argsort(srf_wvn)
+    srf_w = np.asarray(srf_wvn, dtype=float)[srf_order]
+    srf_r = np.asarray(srf_response, dtype=float)[srf_order]
+    srf_lo, srf_hi = float(srf_w[0]), float(srf_w[-1])
+
+    # keep only channels whose full SRF support lies inside the input grid
+    # (one grid cell of tolerance for floating-point grid end points)
+    ch_all = np.asarray(channel_wvn, dtype=float)
+    tol = dwvn
+    covered = ((ch_all + srf_lo >= wvn_grid[0] - tol)
+               & (ch_all + srf_hi <= wvn_grid[-1] + tol))
+    channels = ch_all[covered]
+    if channels.size == 0:
+        raise ValueError(
+            f"build_srf_channel_operator: no channel of {ch_all.size} fits "
+            f"inside the input wavenumber grid "
+            f"[{wvn_grid[0]:.2f}, {wvn_grid[-1]:.2f}] cm^-1 with its full SRF "
+            f"support [{srf_lo:.2f}, {srf_hi:.2f}] cm^-1. Frequency-chunk "
+            f"files of a SLURM run must be merged first (merge_radiance_"
+            f"chunks.py) -- the SRF needs the spectrum around each channel."
+        )
+    if not covered.all():
+        dropped = ch_all[~covered]
+        print(f"WARNING: {dropped.size} of {ch_all.size} channels are not fully "
+              f"covered by the input grid [{wvn_grid[0]:.2f}, "
+              f"{wvn_grid[-1]:.2f}] cm^-1 -- their SRF support reaches outside "
+              f"it -- and are dropped from the channel output (they span "
+              f"{dropped.min():.2f}-{dropped.max():.2f} cm^-1).  Extend the "
+              f"simulation range by the SRF width "
+              f"(include_sensor_response = True in the radiance run) to get "
+              f"the complete channel grid.")
+
+    # column ranges of the SRF support for every channel
+    j0 = np.searchsorted(wvn_grid, channels + srf_lo, side='left')
+    j1 = np.searchsorted(wvn_grid, channels + srf_hi, side='right')
+    counts = (j1 - j0).astype(np.int64)
+    counts[counts < 0] = 0
+    if np.any(counts == 0):
+        keep = counts > 0
+        channels = channels[keep]
+        j0 = j0[keep]
+        counts = counts[keep]
+
+    indptr = np.zeros(channels.size + 1, dtype=np.int64)
+    np.cumsum(counts, out=indptr[1:])
+    nnz = int(indptr[-1])
+
+    row = np.repeat(np.arange(channels.size, dtype=np.int64), counts)
+    # global positions offset so that row r spans j0[r] ... j1[r]-1
+    col = (np.arange(nnz, dtype=np.int64)
+           + np.repeat(j0 - indptr[:-1], counts)).astype(np.int32)
+
+    # SRF sampled at the grid offsets of each channel, times the grid spacing
+    # (wavenumber quadrature), then renormalized to unit sum per channel
+    offsets = wvn_grid[col] - channels[row]
+    data = np.interp(offsets, srf_w, srf_r) * dwvn
+    row_sums = np.bincount(row, weights=data)
+    if np.any(np.abs(row_sums) < 1e-10):
+        raise ValueError("build_srf_channel_operator: an SRF row integrates "
+                         "to zero, cannot normalize")
+    data = (data / row_sums[row]).astype(np.float64)
+
+    operator = sp.csr_matrix((data, col, indptr),
+                             shape=(channels.size, wvn_grid.size))
+    print(f"  SRF channel operator: {operator.shape[0]} channels x "
+          f"{operator.shape[1]} simulation frequencies, {nnz} non-zeros "
+          f"({nnz / channels.size:.0f} per channel), row sums "
+          f"{np.bincount(row, weights=data).min():.12f} to "
+          f"{np.bincount(row, weights=data).max():.12f}")
+    return operator, channels
+
+
+def convolve_with_srf_to_channels(spectral_field, operator):
+    """
+    Apply a pre-built SRF channel operator along axis 0 of a spectral field.
+
+    Parameters
+    ----------
+    spectral_field : ndarray, shape (N_wvn, ...)
+        Full-resolution spectral field (radiance or brightness temperature),
+        frequency along axis 0, matching the column count of the operator.
+        Any number of trailing dimensions is handled.
+    operator : scipy.sparse.csr_matrix, shape (N_channels, N_wvn)
+        Operator from build_srf_channel_operator.
+
+    Returns
+    -------
+    ndarray, shape (N_channels, ...)
+        Channel-resolved field, same units as the input.
+    """
+    field = np.asarray(spectral_field, dtype=float)
+    if field.shape[0] != operator.shape[1]:
+        raise ValueError(
+            f"convolve_with_srf_to_channels: field has {field.shape[0]} "
+            f"frequency points, the operator expects {operator.shape[1]}"
+        )
+    rest = field.shape[1:]
+    flat = operator @ field.reshape(field.shape[0], -1)
+    return np.asarray(flat).reshape((operator.shape[0],) + rest)
 
 
 def radiance2brightness_temp(spectral_radiance, wavenumber):

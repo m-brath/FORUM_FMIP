@@ -4,14 +4,21 @@
 Apply sensor response function (SRF) to spectral radiance and compute brightness temperature.
 
 This script reads the output from fmip_radiance_batch.py (high-resolution spectral
-radiance at TOA), applies the sensor response function (SRF) via spectral convolution
-to simulate instrument filtering, and optionally converts the result to brightness
-temperature via Planck inversion.
+radiance at TOA), applies the sensor response function (SRF) to simulate
+instrument filtering, and converts the result to brightness temperature via
+Planck inversion.
 
 The SRF defines the spectral response characteristics of a sensor (e.g., IASI).
-Convolution with the SRF smooths the high-resolution radiance spectrum to the
-instrument's effective resolution, while Planck inversion converts the resulting
-convolved radiance to brightness temperature (the equivalent blackbody temperature).
+Applying it smooths the high-resolution radiance spectrum to the instrument's
+effective resolution AND reduces the spectral grid to the instrument's channel
+grid: the output carries the IASI channel centres (8461 channels,
+645-2760 cm^-1, 0.25 cm^-1 spacing) instead of the simulation frequency grid.
+For every channel centre the SRF-weighted average of the high-resolution
+spectrum is evaluated directly (unit-sum quadrature over the SRF support, see
+frtmip_aux_functions.build_srf_channel_operator) -- the smoothed spectrum is
+never resampled, so no resolution is lost or invented by interpolation.
+Planck inversion then converts the channel radiance to brightness temperature
+(the equivalent blackbody temperature).
 
 Environment (mamba/conda):    pyarts
                               (same as fmip_radiance_batch.py)
@@ -24,6 +31,7 @@ constant, results/RADIANCE/<run_name>/:
     merge_radiance_chunks.py ran with delete_chunk_files = True), the merged
     files Reference_radiance_TOA_merged_*.nc are used instead.
     data/sensor_response.nc  (SRF wavenumber offsets and response)
+    data/satdata.nc          (IASI channel centres, "wvn" -- the output grid)
 
 Output:
     results/RADIANCE/<run_name>/Reference_convolved_*_chunk*.nc
@@ -33,6 +41,10 @@ Output:
     - spectral_radiance_convolved: convolved radiance (frequency, idx)
     - brightness_temperature: brightness temperature (frequency, idx)
     - Metadata: SRF name, convolution method, physical constants used
+    Both variables live on the IASI channel grid: the "frequency" /
+    "wavenumber" coordinates are the channel centres, not the simulation grid
+    (8461 points instead of e.g. 108951 -- the files are correspondingly
+    smaller, ~135 MB instead of ~1.7 GB per variable for the full SLURM run).
 
 Example
 -------
@@ -46,17 +58,24 @@ Notes
 -----
 * The input radiance grid is already extended to cover the SRF bandwidth
   (see fmip_radiance_batch.py), so no additional padding is needed.
-* Convolution is performed independently per column to preserve spatial structure.
-  The simulation grid is uniform in wavenumber, so the SRF sampled at the grid
-  offsets is one stationary kernel and the convolution is a single vectorized
-  filter pass (see frtmip_aux_functions.convolve_with_srf).
+* Applying the SRF needs the full high-resolution spectrum around every
+  channel, so the input files must cover the complete satellite range
+  (merged files or a non-chunked run).  A frequency-chunk file of a SLURM run
+  only holds a short slice of the spectrum and cannot be convolved -- merge
+  the run with merge_radiance_chunks.py first.
+* The SRF filter is applied independently per column (and per level / viewing
+  direction of the optional full field) to preserve spatial structure.
+  Because the operator is the same for all columns it is built once per run
+  and reused for every input file.
 * Planck inversion is the exact analytic inversion of the frequency-domain
   Planck function (radiance per Hz, matching the ARTS/DISORT output units;
   see frtmip_aux_functions.radiance2brightness_temp).
-* Output files mirror the input radiance structure: same frequency grid,
-  same column indices (idx), same metadata where applicable.
-* Processing is fast: for ~2180 frequencies x 500 columns, expect well under
-  a second per chunk.
+* Output files carry the IASI channel grid (channel centres from
+  data/satdata.nc), the same column indices (idx) and the same metadata as
+  the input; compare_convolved_with_obs.py therefore matches the observation
+  grid exactly instead of collocating by nearest simulation channel.
+* Processing is fast: building the SRF channel operator takes ~1 s, applying
+  it to a chunk takes a few seconds.
 """
 
 import time
@@ -66,6 +85,7 @@ import re
 
 import numpy as np
 import xarray as xr
+import scipy.constants as scc
 
 import frtmip_aux_functions as fax
 
@@ -85,6 +105,10 @@ results_folder = script_dir.parent / "results" / "RADIANCE" / run_name
 
 # Input data files
 sensor_response_file = data_dir / "sensor_response.nc"
+# output grid: sensor (IASI) channel centres, taken from the "wvn" coordinate
+# of the satellite data file (same grid define_frequency_grid uses to build
+# the simulation range)
+satdata_file = data_dir / "satdata.nc"
 
 # Whether to also convolve the full 5D field (frequency, idx, lev, zenith,
 # azimuth) if present in the input file
@@ -94,8 +118,9 @@ include_full_field = False
 # Output options
 export_results = True
 export_convolved_radiance = False  # save the convolved radiance
-# (kept False for the 16 GB slurm run: both exports would need ~32-35 GB
-# and the local disk only has ~35 GB free; set back to True if needed)
+# (the channel-grid products are small -- ~135 MB per variable and 2000-column
+# idx chunk, ~270 MB with both exports -- so enabling this no longer strains
+# the disk; keep False to stay comparable with the BT-only comparison runs)
 export_brightness_temperature = True  # save the brightness temperature
 
 
@@ -239,6 +264,23 @@ def main():
     srf_wvn, srf_response, srf_norm_factor = validate_and_normalize_srf(srf_wvn, srf_response)
 
     # -------------------------------------------------------------------------
+    # Load the sensor (IASI) channel grid -- the spectral grid of the output
+    # -------------------------------------------------------------------------
+    print("\nLoading sensor channel grid...")
+    if not satdata_file.is_file():
+        raise FileNotFoundError(
+            f"{satdata_file} not found.  It provides the sensor (IASI) channel "
+            f"centres that the convolved products are written on; run "
+            f"prepare_data.py first."
+        )
+    satdata = xr.open_dataset(satdata_file)
+    channel_wvn_all = np.sort(satdata["wvn"].values)
+    satdata.close()
+    print(f"  {channel_wvn_all.size} channels, {channel_wvn_all.min():.2f} to "
+          f"{channel_wvn_all.max():.2f} cm^-1, spacing "
+          f"{np.median(np.diff(channel_wvn_all)):.4f} cm^-1")
+
+    # -------------------------------------------------------------------------
     # Discover radiance chunks
     # -------------------------------------------------------------------------
     print("\nDiscovering radiance chunks...")
@@ -269,6 +311,14 @@ def main():
     # Process each radiance chunk
     # -------------------------------------------------------------------------
     all_stats = []
+
+    # SRF channel operator: built from the first input file's frequency grid
+    # and reused for all files of the run (all files carry the same grid)
+    channel_operator = None
+    channel_wvn = None
+    channel_frequency = None
+    f_grid_ref = None
+    t_operator = 0.0
 
     for ck, radiance_file in enumerate(radiance_files):
         print("\n" + "=" * 70)
@@ -302,20 +352,44 @@ def main():
         print(f"  Number of columns: {n_idx}")
 
         # =====================================================================
-        # Step 1: Apply SRF convolution
+        # Step 0: Build the SRF channel operator (once per run)
         # =====================================================================
-        print("  Applying SRF convolution...")
+        if channel_operator is None:
+            print("  Building SRF channel operator "
+                  "(SRF-weighted quadrature at the channel centres)...")
+            t_op = time.time()
+            channel_operator, channel_wvn = fax.build_srf_channel_operator(
+                f_grid, srf_wvn, srf_response, channel_wvn_all
+            )
+            t_operator = time.time() - t_op
+            channel_frequency = channel_wvn * 100.0 * scc.c  # Hz
+            f_grid_ref = f_grid
+            print(f"    Operator built in {t_operator:.2f} s; output grid: "
+                  f"{channel_wvn.size} channels, {channel_wvn.min():.2f} to "
+                  f"{channel_wvn.max():.2f} cm^-1")
+        elif not np.array_equal(f_grid, f_grid_ref):
+            raise ValueError(
+                f"{radiance_file.name}: frequency grid differs from the first "
+                f"input file of this run -- the SRF channel operator built "
+                f"from it does not apply. Process files of one grid together."
+            )
+
+        # =====================================================================
+        # Step 1: Apply the SRF and reduce to the sensor channel grid
+        # =====================================================================
+        print("  Applying SRF convolution at the channel centres...")
         t_conv = time.time()
-        spectral_radiance_convolved = fax.convolve_with_srf(
-            spectral_radiance_TOA, f_grid, srf_wvn, srf_response
+        spectral_radiance_convolved = fax.convolve_with_srf_to_channels(
+            spectral_radiance_TOA, channel_operator
         )
         if spectral_radiance_field is not None:
             # frequency is axis 0 of the full cube as well
-            spectral_radiance_field_convolved = fax.convolve_with_srf(
-                spectral_radiance_field, f_grid, srf_wvn, srf_response
+            spectral_radiance_field_convolved = fax.convolve_with_srf_to_channels(
+                spectral_radiance_field, channel_operator
             )
         t_conv_elapsed = time.time() - t_conv
-        print(f"    Convolution completed in {t_conv_elapsed:.2f} s")
+        print(f"    Convolution completed in {t_conv_elapsed:.2f} s "
+              f"({n_wvn} simulation frequencies -> {channel_wvn.size} channels)")
 
         # Sanity check: convolution should not dramatically change the range
         print(f"  Input radiance range: {spectral_radiance_TOA.min():.3e} to "
@@ -323,14 +397,18 @@ def main():
         print(f"  Convolved radiance range: {spectral_radiance_convolved.min():.3e} to "
               f"{spectral_radiance_convolved.max():.3e}")
 
-        # Estimate energy conservation
-        energy_in = np.sum(spectral_radiance_TOA)
-        energy_out = np.sum(spectral_radiance_convolved)
-        if energy_in > 0:
-            energy_ratio = energy_out / energy_in
-            print(f"  Energy conservation ratio: {energy_ratio:.4f}")
+        # Filtering check: the channel values are unit-sum weighted averages of
+        # the input spectrum, so the band-average of a locally smooth spectrum
+        # must be preserved.  Compare the mean channel radiance with the mean
+        # of the input spectrum sampled at the channel centres.
+        input_at_channels = np.interp(channel_wvn, wvn_grid,
+                                      spectral_radiance_TOA.mean(axis=1))
+        if input_at_channels.mean() > 0:
+            mean_ratio = spectral_radiance_convolved.mean() / input_at_channels.mean()
+            print(f"  Band-mean radiance ratio (channel values / input at "
+                  f"channel centres): {mean_ratio:.4f}")
         else:
-            energy_ratio = np.nan
+            mean_ratio = np.nan
 
         # =====================================================================
         # Step 2: Convert to brightness temperature
@@ -338,7 +416,7 @@ def main():
         print("  Computing brightness temperature via Planck inversion...")
         t_bt = time.time()
         brightness_temperature = fax.radiance2brightness_temp(
-            spectral_radiance_convolved, wvn_grid
+            spectral_radiance_convolved, channel_wvn
         )
         t_bt_elapsed = time.time() - t_bt
         print(f"    Planck inversion completed in {t_bt_elapsed:.2f} s")
@@ -363,7 +441,8 @@ def main():
                 spectral_radiance_convolved,
                 {
                     "units": "W m^-2 Hz^-1 sr^-1",
-                    "description": "Spectral radiance after SRF convolution",
+                    "description": "Spectral radiance after SRF convolution, "
+                                   "sensor channel grid",
                     "zenith_angle": float(zenith_angle),
                     "srf_normalization_factor": float(srf_norm_factor),
                 },
@@ -374,7 +453,8 @@ def main():
                 brightness_temperature,
                 {
                     "units": "K",
-                    "description": "Brightness temperature from Planck inversion",
+                    "description": "Brightness temperature from Planck inversion "
+                                   "of the channel radiance, sensor channel grid",
                     "zenith_angle": float(zenith_angle),
                 },
             )
@@ -383,28 +463,41 @@ def main():
             output_vars,
             coords={
                 "idx": ("idx", idx_coords),
-                "frequency": ("frequency", f_grid, {"units": "Hz"}),
-                "wavenumber": ("frequency", wvn_grid, {"units": "cm^-1"}),
+                # sensor (IASI) channel centres -- the instrument's spectral
+                # grid, replacing the simulation grid of the input file
+                "frequency": ("frequency", channel_frequency, {"units": "Hz"}),
+                "wavenumber": ("frequency", channel_wvn, {"units": "cm^-1"}),
             },
         )
 
         if spectral_radiance_field is not None:
             # full cube, same layout as the input
-            # (frequency, idx, lev, zenith, azimuth)
+            # (frequency, idx, lev, zenith, azimuth), frequency axis now the
+            # sensor channel grid
             output_ds["spectral_radiance_field_convolved"] = (
                 ["frequency", "idx", "lev", "zenith", "azimuth"],
                 spectral_radiance_field_convolved,
                 {
                     "units": "W m^-2 Hz^-1 sr^-1",
-                    "description": "Full radiance cube after SRF convolution",
+                    "description": "Full radiance cube after SRF convolution, "
+                                   "sensor channel grid",
                     "note": "level axis surface-first (index 0 = SFC, -1 = TOA)",
                 },
             )
 
         # Copy attributes from input dataset if available
         output_ds.attrs.update(radiance_ds.attrs)
-        output_ds.attrs["convolution_method"] = "spectral_srf_convolution"
+        output_ds.attrs["convolution_method"] = (
+            "srf_weighted_average_evaluated_at_channel_centres"
+        )
         output_ds.attrs["srf_file"] = str(sensor_response_file.name)
+        output_ds.attrs["channel_grid_file"] = str(satdata_file.name)
+        output_ds.attrs["spectral_grid"] = (
+            f"sensor channel grid: {channel_wvn.size} channels, "
+            f"{channel_wvn.min():.2f}-{channel_wvn.max():.2f} cm^-1 "
+            f"(input simulation grid: {n_wvn} points, "
+            f"{wvn_grid.min():.2f}-{wvn_grid.max():.2f} cm^-1)"
+        )
         output_ds.attrs["planck_inversion_method"] = "analytic_planck_inversion"
 
         # =====================================================================
@@ -433,10 +526,11 @@ def main():
             "chunk": ck,
             "file": radiance_file.name,
             "n_columns": n_idx,
-            "n_frequencies": n_wvn,
+            "n_sim_frequencies": n_wvn,
+            "n_channels": channel_wvn.size,
             "time_convolution": t_conv_elapsed,
             "time_planck": t_bt_elapsed,
-            "energy_ratio": energy_ratio,
+            "mean_ratio": mean_ratio,
             "bt_min": brightness_temperature.min(),
             "bt_max": brightness_temperature.max(),
             "bt_mean": np.nanmean(brightness_temperature),
@@ -452,26 +546,32 @@ def main():
     print("Processing Summary")
     print("=" * 70)
 
-    print(f"Total processing time: {time.time() - t_start:.1f} s")
+    print(f"Total processing time: {time.time() - t_start:.1f} s "
+          f"(SRF channel operator: {t_operator:.1f} s)")
     print(f"Chunks processed: {len(all_stats)}")
+    print(f"Output spectral grid: {channel_wvn.size} sensor channels, "
+          f"{channel_wvn.min():.2f}-{channel_wvn.max():.2f} cm^-1")
 
     print("\nPer-chunk statistics:")
-    print(f"{'Chunk':<6} {'Columns':<10} {'Conv Time':<12} {'BT Range':<25}")
-    print("-" * 60)
+    print(f"{'Chunk':<6} {'Columns':<10} {'Channels':<10} {'Conv Time':<12} "
+          f"{'BT Range':<25}")
+    print("-" * 72)
     for stats in all_stats:
         bt_range = f"{stats['bt_min']:.1f}–{stats['bt_max']:.1f} K"
         print(
             f"{stats['chunk']:<6} {stats['n_columns']:<10} "
-            f"{stats['time_convolution']:<12.2f} {bt_range:<25}"
+            f"{stats['n_channels']:<10} {stats['time_convolution']:<12.2f} "
+            f"{bt_range:<25}"
         )
 
-    # Energy conservation check
-    energy_ratios = [s["energy_ratio"] for s in all_stats if not np.isnan(s["energy_ratio"])]
-    if energy_ratios:
-        avg_energy_ratio = np.mean(energy_ratios)
-        print(f"\nAverage energy conservation ratio: {avg_energy_ratio:.4f}")
-        if avg_energy_ratio < 0.98:
-            print("  WARNING: Energy ratio < 0.98; check convolution implementation.")
+    # Band-mean filtering check
+    mean_ratios = [s["mean_ratio"] for s in all_stats if not np.isnan(s["mean_ratio"])]
+    if mean_ratios:
+        avg_mean_ratio = np.mean(mean_ratios)
+        print(f"\nAverage band-mean radiance ratio: {avg_mean_ratio:.4f}")
+        if not 0.9 <= avg_mean_ratio <= 1.1:
+            print("  WARNING: band-mean radiance ratio far from 1; check the "
+                  "SRF operator and the input radiance.")
 
     # Brightness temperature range check
     all_bt_min = min(s["bt_min"] for s in all_stats)

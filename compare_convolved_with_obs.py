@@ -26,15 +26,20 @@ y = difference bin, colour = normalised frequency / probability density).
 One simulation run is compared per invocation, selected by the run_name
 constant (results/RADIANCE/<run_name>/), mirroring convolve_sensor_response.py.
 Only convolved files belonging to that run are discovered (file-name patterns
-pinned to run_name).  Convolved products on the 8461-channel observation grid
-(645-2760 cm^-1, 0.25 cm^-1 spacing) are compared exactly; products on a
-finer simulation frequency grid (e.g. the merged SLURM run, 0.02 cm^-1
-spacing) are collocated to the observation grid by nearest simulation
-channel - an offset of at most half the simulation grid spacing, far below
-the SRF width.  Files that carry only brightness_temperature (convolve run
-with export_convolved_radiance = False) are compared in brightness
-temperature only; radiance quantities are skipped.  All chunks carry the
-global column index (idx 0-19705), so columns match the observations exactly.
+pinned to run_name).  convolve_sensor_response.py writes its products on the
+sensor (IASI) channel grid, so they match the 8461-channel observation grid
+(645-2760 cm^-1, 0.25 cm^-1 spacing) exactly and are compared point by point;
+older products still on a finer simulation frequency grid (e.g. the merged
+SLURM run of an earlier convolve run, 0.02 cm^-1 spacing) are collocated to the
+observation grid by nearest simulation channel - an offset of at most half the
+simulation grid spacing, far below the SRF width.  A run whose simulation
+range does not cover the SRF width beyond the satellite range is missing its
+edge channels (the convolve step drops channels whose SRF support is not
+covered); the collocation tolerance check reports that.  Files that carry only
+brightness_temperature (convolve run with export_convolved_radiance = False)
+are compared in brightness temperature only; radiance quantities are skipped.
+All chunks carry the global column index (idx 0-19705), so columns match the
+observations exactly.
 
 Environment (mamba/conda):    pyarts
                               (same as convolve_sensor_response.py)
@@ -59,8 +64,9 @@ script; it discovers the run's convolved chunks automatically.
 Notes
 -----
 * All statistics and histograms are computed on the observation channel grid;
-  chunk arrays on a finer simulation grid are collocated to it (nearest
-  simulation channel) before the streaming accumulation starts.
+  the convolved products are written on that grid by convolve_sensor_response.py
+  (products of older convolve runs on a finer simulation grid are collocated to
+  it by nearest simulation channel) before the streaming accumulation starts.
 * The observed T_b fields contain fill values (-777); they are masked via the
   valid-range check (bt_valid_range) and excluded from all statistics.
 * Processing runs in two streaming passes over the chunks per setup: pass 1
