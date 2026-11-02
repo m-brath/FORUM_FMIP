@@ -21,7 +21,10 @@ for three quantities:
 
 In addition, the distribution of the differences is accumulated as a
 per-wavenumber histogram and plotted as pcolormesh (x = wavenumber,
-y = difference bin, colour = normalised frequency / probability density).
+y = difference bin, colour = probability density), and the mean of the
+simulation and of the observation themselves is accumulated per wavenumber
+together with the standard deviation across columns -- plotted as one figure
+per quantity with both mean spectra and their +-1 std bands.
 
 One simulation run is compared per invocation, selected by the run_name
 constant (results/RADIANCE/<run_name>/), mirroring convolve_sensor_response.py.
@@ -53,6 +56,14 @@ Input data:
 Output:
     results/COMPARISON/comparison_stats_<run_name>.nc  aggregate statistics
     plot/comparison/fig_<...>_<run_name>.png / .pdf    figures
+    The statistics file holds, per compared quantity and wavenumber, the
+    difference statistics (diff_mean / diff_std / diff_rmse), the histogram
+    counts, and the mean and standard deviation of the simulation and of the
+    observation themselves (sim_mean_*, sim_std_*, obs_mean_*, obs_std_*).
+    Figures: one mean-spectra figure per quantity (mean simulation vs mean
+    observation, each with its +-1 std band, plus the difference strip), the
+    three-panel difference statistics, and the difference-distribution
+    pcolormesh.
 
 Example
 -------
@@ -67,6 +78,12 @@ Notes
   the convolved products are written on that grid by convolve_sensor_response.py
   (products of older convolve runs on a finer simulation grid are collocated to
   it by nearest simulation channel) before the streaming accumulation starts.
+* The +-1 std bands of the mean-spectra figure are the across-column (global)
+  variability of the scene/atmosphere at a given channel -- dominated by the
+  surface and lower-troposphere emission in the window channels -- not an
+  uncertainty of the mean itself (that would be std / sqrt(N)).
+* Axis labels use the "quantity / unit" notation; styling (font, palette,
+  spectral-region annotations) is set once by apply_plot_style below.
 * The observed T_b fields contain fill values (-777); they are masked via the
   valid-range check (bt_valid_range) and excluded from all statistics.
 * Processing runs in two streaming passes over the chunks per setup: pass 1
@@ -93,6 +110,8 @@ import matplotlib
 # matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+from matplotlib import font_manager
+from matplotlib import patheffects
 from matplotlib.font_manager import FontProperties
 from matplotlib.colors import LogNorm
 
@@ -138,31 +157,121 @@ sample_column_stride = 10              # column subsampling for auto range
 export_stats = True
 make_plots = True
 
+# Plot styling ("quantity / unit" axis labels throughout)
+plot_font = "Helvetica Neue"       # falls back to Arial / DejaVu Sans if absent
+palette = {
+    "obs": "#1b5e8a",              # observation curves
+    "sim": "#b3352b",              # simulation curves
+    "diff": "#3d3d3d",             # difference curves
+    "band_obs": "#1b5e8a",
+    "band_sim": "#b3352b",
+    "shade": "#d9d9d9",            # atmospheric-window shading
+    "feature": "#7f7f7f",          # absorption-feature markers
+}
+line_width = 0.7
+
+# Atmospheric window (shaded) and major absorption features (dotted markers)
+# in the IASI range -- (wavenumber / cm^-1, label)
+window_range_cm = (800.0, 1200.0)
+spectral_features = [
+    (667.4, r"CO$_2$ $\nu_2$"),
+    (1040.0, r"O$_3$"),
+    (1284.0, r"N$_2$O"),
+    (1306.0, r"CH$_4$"),
+    (1594.0, r"H$_2$O $\nu_2$"),
+    (2349.0, r"CO$_2$ $\nu_3$"),
+]
+
+# Plain-text spellings of the mathtext units used in axis labels: for inline
+# annotations (plain_units) and for the probability-density colour bars,
+# which carry the reciprocal unit (inverse_units).
+plain_units = {
+    "K": "K",
+    "W m$^{-2}$ Hz$^{-1}$ sr$^{-1}$": "W m^-2 Hz^-1 sr^-1",
+    "%": "%",
+}
+inverse_units = {
+    "K": "K$^{-1}$",
+    "W m$^{-2}$ Hz$^{-1}$ sr$^{-1}$": "W$^{-1}$ m$^2$ Hz sr$",
+    "%": "%$^{-1}$",
+}
+
 # =============================================================================
 # %% plot formatting (adapted from opacity_helper_function.py)
 # =============================================================================
 
+def apply_plot_style():
+    """
+    Set the global matplotlib style of the comparison figures.
+
+    Prefers plot_font, falls back through the available fonts; compact
+    sans-serif labels, thin spines, dotted grids, mathtext in the same
+    sans family so that the "quantity / unit" labels look consistent.
+    """
+    available = {f.name for f in font_manager.fontManager.ttflist}
+    family = [f for f in (plot_font, "Helvetica Neue", "Helvetica", "Arial",
+                          "DejaVu Sans") if f in available] or ["DejaVu Sans"]
+
+    matplotlib.rcParams.update({
+        "font.family": "sans-serif",
+        "font.sans-serif": family + ["DejaVu Sans"],
+        "mathtext.fontset": "dejavusans",
+        "font.size": 8.5,
+        "axes.labelsize": 9.0,
+        "axes.titlesize": 9.5,
+        "axes.linewidth": 0.6,
+        "axes.grid": False,
+        "grid.linewidth": 0.3,
+        "grid.linestyle": ":",
+        "grid.alpha": 0.6,
+        "xtick.labelsize": 8.0,
+        "ytick.labelsize": 8.0,
+        "xtick.major.size": 3.5,
+        "ytick.major.size": 3.5,
+        "xtick.minor.size": 2.0,
+        "ytick.minor.size": 2.0,
+        "legend.fontsize": 7.5,
+        "legend.framealpha": 0.9,
+        "legend.borderpad": 0.5,
+        "figure.facecolor": "white",
+        "axes.facecolor": "white",
+        "savefig.dpi": 300,
+        "savefig.bbox": "tight",
+    })
+
+
+apply_plot_style()
+
+
 def default_figure_gridspec(rows=1, columns=1, width_in_cm=21.0,
-                            height_in_cm=15.0, constrained_layout=True):
+                            height_in_cm=15.0, constrained_layout=True,
+                            hspace=0.35, wspace=0.2, height_ratios=None):
     """Create a figure with cm-based size and a gridspec."""
     fig = plt.figure(constrained_layout=constrained_layout)
     fig.set_size_inches(width_in_cm / 2.54, height_in_cm / 2.54)
-    spec = gridspec.GridSpec(ncols=columns, nrows=rows, figure=fig, hspace=0.35)
+    spec = gridspec.GridSpec(ncols=columns, nrows=rows, figure=fig,
+                             hspace=hspace, wspace=wspace,
+                             height_ratios=height_ratios)
 
     return fig, spec
 
 
-def default_plot_format(ax, font_name=None, grid_on=True):
+def default_plot_format(ax, font_name=None, grid_on=True, minor_ticks=True):
     """Apply consistent formatting to matplotlib axes."""
     font = FontProperties()
     if font_name is not None:
         font.set_name(font_name)
 
     if grid_on:
-        ax.grid(which='both', linestyle=':', linewidth=0.25)
-    ax.spines['right'].set_visible(False)
-    ax.spines['top'].set_visible(False)
-    ax.axes.tick_params(direction='in', which='both')
+        ax.grid(which="major", linestyle=":", linewidth=0.3, alpha=0.6)
+        if minor_ticks:
+            ax.grid(which="minor", linestyle=":", linewidth=0.2, alpha=0.25)
+    for spine in ("right", "top"):
+        ax.spines[spine].set_visible(False)
+    ax.tick_params(direction="in", which="both")
+    if minor_ticks and grid_on:
+        ax.minorticks_on()
+    ax.set_axisbelow(True)
 
     return ax, font
 
@@ -299,6 +408,12 @@ def compute_differences(sim_radiance, sim_bt, obs_tb, freq):
         Absolute radiance difference [W m^-2 Hz^-1 sr^-1],
         relative radiance difference [%], brightness temperature difference [K].
         d_rad and d_rel are None if sim_radiance is None (BT-only run).
+    fields : dict
+        The collocated simulation and observation fields themselves, masked
+        with the same validity mask as the differences, so that the mean and
+        standard deviation of each side can be accumulated alongside the
+        difference statistics: {"bt": (sim, obs)} plus {"rad": (sim, obs)} for
+        radiance runs.
     """
     with np.errstate(invalid="ignore"):
         obs_valid = (obs_tb > bt_valid_range[0]) & (obs_tb < bt_valid_range[1])
@@ -310,7 +425,9 @@ def compute_differences(sim_radiance, sim_bt, obs_tb, freq):
         valid = obs_valid & np.isfinite(sim_bt)
         d_bt = sim_bt - obs_tb_safe
         d_bt = np.where(~valid, np.nan, d_bt)
-        return None, None, d_bt
+        fields = {"bt": (np.where(valid, sim_bt, np.nan),
+                         np.where(valid, obs_tb_safe, np.nan))}
+        return None, None, d_bt, fields
 
     obs_radiance = planck_frequency(freq, obs_tb_safe)
 
@@ -326,7 +443,16 @@ def compute_differences(sim_radiance, sim_bt, obs_tb, freq):
     d_rel = np.where(bad, np.nan, d_rel)
     d_bt = np.where(bad, np.nan, d_bt)
 
-    return d_rad, d_rel, d_bt
+    valid_bt = valid & np.isfinite(d_bt)
+    valid_rad = valid & np.isfinite(d_rad)
+    fields = {
+        "bt": (np.where(valid_bt, sim_bt, np.nan),
+               np.where(valid_bt, obs_tb_safe, np.nan)),
+        "rad": (np.where(valid_rad, sim_radiance, np.nan),
+                np.where(valid_rad, obs_radiance, np.nan)),
+    }
+
+    return d_rad, d_rel, d_bt, fields
 
 
 def accumulate_stats(counts, sums, sum_sqs, d):
@@ -337,6 +463,18 @@ def accumulate_stats(counts, sums, sum_sqs, d):
     counts += valid.sum(axis=1)
     sums += d_clean.sum(axis=1)
     sum_sqs += (d_clean**2).sum(axis=1)
+
+
+def accumulate_field_stats(counts, sums, sum_sqs, values):
+    """
+    Accumulate the running statistics of one side of the comparison.
+
+    Same running sums as accumulate_stats, but applied to the simulation or
+    observation field itself (already masked to NaN for the invalid pairs) so
+    that the mean spectrum and the across-column standard deviation of each
+    side can be reported next to the difference statistics.
+    """
+    accumulate_stats(counts, sums, sum_sqs, values)
 
 
 def finalize_stats(counts, sums, sum_sqs):
@@ -389,29 +527,98 @@ def normalize_histogram(hist, bin_width):
 # %% plotting
 # =============================================================================
 
-def plot_stats_vs_wvn(wvn, mean, std, rmse, ylabel_unit, quantity_label,
-                      out_base, ylim=None):
-    """Three stacked panels: mean difference, std, RMSE vs wavenumber."""
+def annotate_spectral_features(ax, shade_window=True, label=True,
+                               headroom=0.06):
+    """
+    Shade the atmospheric window and mark the major absorption features.
+
+    Purely decorative context for the IASI range: a light band over
+    window_range_cm and dotted markers at spectral_features, with the feature
+    labels placed inside the top of the axes (two staggered rows, so that
+    close-lying features like N2O / CH4 stay readable) after adding a little
+    headroom to the y limits.
+    """
+    if shade_window:
+        ax.axvspan(*window_range_cm, color=palette["shade"], alpha=0.35,
+                   linewidth=0.0, zorder=0)
+        if label:
+            ax.annotate("window",
+                        xy=(0.5 * sum(window_range_cm), 0.015),
+                        xycoords=("data", "axes fraction"),
+                        ha="center", va="bottom", fontsize=7,
+                        color="0.4", style="italic")
+    if not label:
+        return
+
+    ymin, ymax = ax.get_ylim()
+    ax.set_ylim(ymin, ymax + headroom * (ymax - ymin))
+    ymin, ymax = ax.get_ylim()
+    y_text = ymax - 0.015 * (ymax - ymin)
+    x_lo, x_hi = ax.get_xlim()
+    margin = 0.02 * (x_hi - x_lo)
+    for k, (wvn0, feat_label) in enumerate(spectral_features):
+        ax.axvline(wvn0, color=palette["feature"], linewidth=0.5,
+                   linestyle=(0, (1, 3)), zorder=1)
+        # keep labels of edge features inside the axes
+        if wvn0 < x_lo + margin:
+            ha = "left"
+        elif wvn0 > x_hi - margin:
+            ha = "right"
+        else:
+            ha = "center"
+        ax.annotate(feat_label, xy=(wvn0, y_text), xycoords="data",
+                    xytext=(0, -9 * (k % 2)), textcoords="offset points",
+                    ha=ha, va="top", fontsize=6.5,
+                    color=palette["feature"], zorder=4)
+
+
+def plot_stats_vs_wvn(wvn, mean, std, rmse, symbol, ylabel_unit,
+                      quantity_label, out_base, ylim=None):
+    """
+    Three stacked panels: mean difference, std and RMSE vs wavenumber.
+
+    Labels use the "quantity / unit" notation (e.g. "T_B difference / K").
+    """
     fig, spec = default_figure_gridspec(
-        rows=3, columns=1, width_in_cm=21.0, height_in_cm=18.0
+        rows=3, columns=1, width_in_cm=21.0, height_in_cm=18.0, hspace=0.45
     )
 
     panels = [
-        (mean, f"Mean difference (sim − obs)\n[{ylabel_unit}]"),
-        (std, f"Std. of difference\n[{ylabel_unit}]"),
-        (rmse, f"RMSE\n[{ylabel_unit}]"),
+        (mean, f"{symbol} / {ylabel_unit}", "mean"),
+        (std, f"standard deviation of {symbol} / {ylabel_unit}", "level"),
+        (rmse, f"root mean square of {symbol} / {ylabel_unit}", "level"),
     ]
 
-    for k, (y, ylab) in enumerate(panels):
+    for k, (y, ylab, kind) in enumerate(panels):
         ax, font = default_plot_format(fig.add_subplot(spec[k, :]))
-        ax.plot(wvn, y, color="0.2", linewidth=0.6)
+        if kind == "mean":
+            # zero line plus a fill coloured by the sign of the difference
+            ax.axhline(0.0, color="0.5", linewidth=0.6, zorder=2)
+            ax.fill_between(wvn, 0.0, y, where=np.isfinite(y) & (y >= 0),
+                            color=palette["sim"], alpha=0.18,
+                            interpolate=True, zorder=1)
+            ax.fill_between(wvn, 0.0, y, where=np.isfinite(y) & (y < 0),
+                            color=palette["obs"], alpha=0.18,
+                            interpolate=True, zorder=1)
+            ax.plot(wvn, y, color=palette["diff"], linewidth=line_width,
+                    zorder=3)
+        else:
+            ax.plot(wvn, y, color=palette["diff"], linewidth=line_width)
+            avg = np.nanmean(y)
+            ax.axhline(avg, color=palette["feature"], linewidth=0.6,
+                       linestyle="--", zorder=3)
+            ax.annotate(f"mean {avg:.2f} {plain_units[ylabel_unit]}",
+                        xy=(0.985, avg), xycoords=("axes fraction", "data"),
+                        xytext=(0, 4), textcoords="offset points",
+                        ha="right", fontsize=7, color=palette["feature"])
         ax.set_ylabel(ylab, fontproperties=font)
         if ylim is not None:
             ax.set_ylim(ylim)
         if k == 0:
             ax.set_title(quantity_label, fontproperties=font)
+            annotate_spectral_features(ax, headroom=0.0 if ylim else 0.06)
         if k == len(panels) - 1:
-            ax.set_xlabel("Wavenumber [cm$^{-1}$]", fontproperties=font)
+            ax.set_xlabel("Wavenumber / cm$^{-1}$", fontproperties=font)
         ax.set_xlim(wvn.min(), wvn.max())
 
     fig.savefig(f"{out_base}.png", dpi=300)
@@ -419,9 +626,71 @@ def plot_stats_vs_wvn(wvn, mean, std, rmse, ylabel_unit, quantity_label,
     plt.close(fig)
 
 
-def plot_histogram_pcolormesh(wvn, bin_centers, density, ylabel, quantity_label,
-                              out_base):
-    """Pcolormesh of the per-wavenumber difference distribution."""
+def plot_mean_spectra(wvn, sim_mean, sim_std, obs_mean, obs_std, symbol,
+                      ylabel_unit, quantity_label, out_base):
+    """
+    Mean simulation and observation spectra, each with its +-1 std band.
+
+    Upper panel: the two mean spectra (across all compared columns) with the
+    +-1 standard-deviation band of each scene-to-scene spread drawn around
+    them.  Lower strip: the difference of the two mean spectra, which is the
+    bias part of the mismatch (the difference statistics of
+    plot_stats_vs_wvn also contain the column-to-column scatter).
+    """
+    fig, spec = default_figure_gridspec(
+        rows=2, columns=1, width_in_cm=21.0, height_in_cm=14.5,
+        constrained_layout=False, hspace=0.06, height_ratios=[2.7, 1.0],
+    )
+    fig.subplots_adjust(top=0.945, bottom=0.075, left=0.085, right=0.995)
+
+    ax, font = default_plot_format(fig.add_subplot(spec[0, :]))
+    for mean, std, color, side in (
+        (obs_mean, obs_std, palette["obs"], "IASI observation"),
+        (sim_mean, sim_std, palette["sim"], "simulation (SRF-convolved)"),
+    ):
+        ax.fill_between(wvn, mean - std, mean + std, color=color, alpha=0.16,
+                        linewidth=0.0, zorder=1)
+        ax.plot(wvn, mean - std, color=color, linewidth=0.35, alpha=0.5,
+                zorder=2)
+        ax.plot(wvn, mean + std, color=color, linewidth=0.35, alpha=0.5,
+                zorder=2)
+        ax.plot(wvn, mean, color=color, linewidth=1.1, zorder=3,
+                label=f"{side} mean")
+    annotate_spectral_features(ax)
+    ax.set_ylabel(f"{symbol} / {ylabel_unit}", fontproperties=font)
+    ax.set_title(f"{quantity_label}: mean over all compared columns "
+                 f"(bands: \u00b11 std)", fontproperties=font)
+    ax.legend(loc="lower right", handlelength=1.6)
+    ax.set_xlim(wvn.min(), wvn.max())
+    ax.set_xticklabels([])
+
+    ax_diff, font = default_plot_format(fig.add_subplot(spec[1, :]))
+    diff = sim_mean - obs_mean
+    ax_diff.axhline(0.0, color="0.5", linewidth=0.6, zorder=2)
+    ax_diff.fill_between(wvn, 0.0, diff, where=np.isfinite(diff) & (diff >= 0),
+                         color=palette["sim"], alpha=0.25, interpolate=True)
+    ax_diff.fill_between(wvn, 0.0, diff, where=np.isfinite(diff) & (diff < 0),
+                         color=palette["obs"], alpha=0.25, interpolate=True)
+    ax_diff.plot(wvn, diff, color=palette["diff"], linewidth=line_width,
+                 zorder=3)
+    ax_diff.set_ylabel(f"difference of means / {ylabel_unit}",
+                       fontproperties=font)
+    ax_diff.set_xlabel("Wavenumber / cm$^{-1}$", fontproperties=font)
+    ax_diff.set_xlim(wvn.min(), wvn.max())
+
+    fig.savefig(f"{out_base}.png", dpi=300)
+    fig.savefig(f"{out_base}.pdf")
+    plt.close(fig)
+
+
+def plot_histogram_pcolormesh(wvn, bin_centers, density, symbol, ylabel_unit,
+                              quantity_label, out_base, mean=None, std=None):
+    """
+    Pcolormesh of the per-wavenumber difference distribution.
+
+    Optionally overplots the mean difference (white line) and the +-1 std
+    envelope (dotted white lines) from the aggregate statistics.
+    """
     fig, spec = default_figure_gridspec(
         rows=1, columns=1, width_in_cm=21.0, height_in_cm=10.0
     )
@@ -434,13 +703,27 @@ def plot_histogram_pcolormesh(wvn, bin_centers, density, ylabel, quantity_label,
         rasterized=True,
     )
 
-    ax.set_xlabel("Wavenumber [cm$^{-1}$]", fontproperties=font)
-    ax.set_ylabel(ylabel, fontproperties=font)
+    if mean is not None:
+        ax.plot(wvn, mean, color="white", linewidth=0.8, zorder=3)
+    if std is not None:
+        ax.plot(wvn, mean + std, color="white", linewidth=0.5,
+                linestyle=(0, (1, 2)), zorder=3)
+        ax.plot(wvn, mean - std, color="white", linewidth=0.5,
+                linestyle=(0, (1, 2)), zorder=3)
+        ax.annotate("solid: mean,  dotted: \u00b11 std",
+                    xy=(0.5, 0.95), xycoords="axes fraction", ha="center",
+                    fontsize=7, color="white", zorder=4,
+                    path_effects=[patheffects.withStroke(linewidth=2.0,
+                                                         foreground="0.15")])
+
+    ax.set_xlabel("Wavenumber / cm$^{-1}$", fontproperties=font)
+    ax.set_ylabel(f"{symbol} / {ylabel_unit}", fontproperties=font)
     ax.set_xlim(wvn.min(), wvn.max())
     ax.set_title(quantity_label, fontproperties=font)
 
     cbar = fig.colorbar(mesh, ax=ax, pad=0.02)
-    cbar.set_label("Normalised frequency [density]", fontproperties=font)
+    cbar.set_label(f"probability density / {inverse_units[ylabel_unit]}",
+                   fontproperties=font)
 
     fig.savefig(f"{out_base}.png", dpi=300)
     fig.savefig(f"{out_base}.pdf")
@@ -461,8 +744,9 @@ def run_comparison(chunk_files, obs_Tb_values, wvn_obs, tag):
     Returns
     -------
     dict with the compared quantities (quantities), per-quantity
-    mean/std/rmse/density arrays, histogram counts, bin edges, and
-    per-wavenumber valid column counts.
+    mean/std/rmse/density arrays, histogram counts, bin edges, per-wavenumber
+    valid column counts, and the per-quantity field statistics ("fields":
+    mean / std of the simulation and of the observation themselves).
     """
     print("\n" + "=" * 70)
     print(f"Run {tag}: {len(chunk_files)} convolved chunk(s)")
@@ -471,6 +755,9 @@ def run_comparison(chunk_files, obs_Tb_values, wvn_obs, tag):
     counts = {}
     sums = {}
     sum_sqs = {}
+    field_counts = {}
+    field_sums = {}
+    field_sum_sqs = {}
     d_rad_samples = []
     quantities = None
     sel = None
@@ -502,6 +789,13 @@ def run_comparison(chunk_files, obs_Tb_values, wvn_obs, tag):
                 counts[q] = np.zeros(wvn_obs.size, dtype=np.int64)
                 sums[q] = np.zeros(wvn_obs.size)
                 sum_sqs[q] = np.zeros(wvn_obs.size)
+                if q in ("bt", "rad"):
+                    # mean / std of each side separately (mean-spectra figure)
+                    for side in ("sim", "obs"):
+                        key = f"{q}_{side}"
+                        field_counts[key] = np.zeros(wvn_obs.size, dtype=np.int64)
+                        field_sums[key] = np.zeros(wvn_obs.size)
+                        field_sum_sqs[key] = np.zeros(wvn_obs.size)
         elif not np.array_equal(wvn, wvn_ref):
             raise ValueError(f"{tag}: wavenumber grid mismatch in "
                              f"{chunk_file.name}")
@@ -513,7 +807,9 @@ def run_comparison(chunk_files, obs_Tb_values, wvn_obs, tag):
         sim_bt = sim_bt[sel, :]
 
         obs_tb = obs_Tb_values[idx, :]  # (N_idx, N_wvn)
-        d_rad, d_rel, d_bt = compute_differences(sim_rad, sim_bt, obs_tb.T, freq_c)
+        d_rad, d_rel, d_bt, fields = compute_differences(
+            sim_rad, sim_bt, obs_tb.T, freq_c
+        )
 
         diffs = {"bt": d_bt}
         if d_rad is not None:
@@ -521,6 +817,11 @@ def run_comparison(chunk_files, obs_Tb_values, wvn_obs, tag):
             diffs["rel"] = d_rel
         for q in quantities:
             accumulate_stats(counts[q], sums[q], sum_sqs[q], diffs[q])
+            if q in ("bt", "rad"):
+                for side, values in zip(("sim", "obs"), fields[q]):
+                    key = f"{q}_{side}"
+                    accumulate_field_stats(field_counts[key], field_sums[key],
+                                           field_sum_sqs[key], values)
 
         if d_rad is not None:
             d_rad_samples.append(
@@ -571,7 +872,8 @@ def run_comparison(chunk_files, obs_Tb_values, wvn_obs, tag):
         sim_bt = sim_bt[sel, :]
 
         obs_tb = obs_Tb_values[idx, :]
-        d_rad, d_rel, d_bt = compute_differences(sim_rad, sim_bt, obs_tb.T, freq_c)
+        d_rad, d_rel, d_bt, _ = compute_differences(sim_rad, sim_bt,
+                                                    obs_tb.T, freq_c)
 
         diffs = {"bt": d_bt}
         if d_rad is not None:
@@ -584,7 +886,7 @@ def run_comparison(chunk_files, obs_Tb_values, wvn_obs, tag):
 
     # Finalize statistics
     stats = {"tag": tag, "quantities": quantities, "bins": bin_configs,
-             "hist": hists, "n_columns": counts["bt"]}
+             "hist": hists, "n_columns": counts["bt"], "fields": {}}
     for q in quantities:
         mean, std, rmse = finalize_stats(counts[q], sums[q], sum_sqs[q])
         stats[q] = {
@@ -593,6 +895,10 @@ def run_comparison(chunk_files, obs_Tb_values, wvn_obs, tag):
                 hists[q].astype(float), bin_configs[q][1] - bin_configs[q][0]
             ),
         }
+    for key, f_counts in field_counts.items():
+        mean, std, _ = finalize_stats(f_counts, field_sums[key],
+                                      field_sum_sqs[key])
+        stats["fields"][key] = {"mean": mean, "std": std, "n": f_counts}
     return stats
 
 
@@ -618,6 +924,20 @@ def export_stats(stats, wvn_obs, out_file):
             0.5 * (stats["bins"][q][:-1] + stats["bins"][q][1:]),
             {"units": units[q]},
         )
+    for key, field in stats.get("fields", {}).items():
+        q, side = key.split("_")
+        nm = names[q]
+        data_vars[f"{side}_mean_{nm}"] = (
+            ["wavenumber"], field["mean"],
+            {"units": units[q],
+             "description": f"mean over all valid columns of the {side}"},
+        )
+        data_vars[f"{side}_std_{nm}"] = (
+            ["wavenumber"], field["std"],
+            {"units": units[q],
+             "description": f"standard deviation across columns of the {side} "
+                            f"(scene variability, not an uncertainty of the mean)"},
+        )
     data_vars["n_columns"] = (["wavenumber"], stats["n_columns"],
                               {"description": "valid columns per wavenumber"})
 
@@ -637,53 +957,82 @@ def export_stats(stats, wvn_obs, out_file):
 
 
 def make_setup_plots(stats, wvn_obs):
-    """Create the stats and histogram figures of one run (per compared quantity)."""
+    """
+    Create the figures of one run: mean spectra, difference statistics,
+    difference distributions (per compared quantity).
+    """
     bin_centers = {q: 0.5 * (stats["bins"][q][:-1] + stats["bins"][q][1:])
                    for q in stats["quantities"]}
     tag = stats["tag"]
+    fields = stats.get("fields", {})
 
+    unit_rad = "W m$^{-2}$ Hz$^{-1}$ sr$^{-1}$"
+
+    # --- mean spectra: simulation vs observation, +-1 std bands ------------
+    if "rad" in stats["quantities"] and "rad_sim" in fields:
+        plot_mean_spectra(
+            wvn_obs, fields["rad_sim"]["mean"], fields["rad_sim"]["std"],
+            fields["rad_obs"]["mean"], fields["rad_obs"]["std"],
+            "spectral radiance L$_\\nu$", unit_rad,
+            "TOA spectral radiance",
+            plot_folder / f"fig_mean_radiance_{tag}",
+        )
+    if "bt_sim" in fields:
+        plot_mean_spectra(
+            wvn_obs, fields["bt_sim"]["mean"], fields["bt_sim"]["std"],
+            fields["bt_obs"]["mean"], fields["bt_obs"]["std"],
+            "brightness temperature T$_B$", "K",
+            "IASI brightness temperature",
+            plot_folder / f"fig_mean_bt_{tag}",
+        )
+
+    # --- difference statistics ---------------------------------------------
     if "rad" in stats["quantities"]:
         plot_stats_vs_wvn(
             wvn_obs, stats["rad"]["mean"], stats["rad"]["std"],
             stats["rad"]["rmse"],
-            "W m$^{-2}$ Hz$^{-1}$ sr$^{-1}$",
-            "Spectral radiance difference (absolute)",
+            "radiance difference", unit_rad,
+            "Spectral radiance difference (absolute, sim − obs)",
             plot_folder / f"fig_radiance_abs_stats_{tag}",
         )
         plot_stats_vs_wvn(
             wvn_obs, stats["rel"]["mean"], stats["rel"]["std"],
             stats["rel"]["rmse"],
-            "%",
+            "radiance difference", "%",
             "Spectral radiance difference (relative to observation)",
             plot_folder / f"fig_radiance_rel_stats_{tag}",
         )
 
     plot_stats_vs_wvn(
         wvn_obs, stats["bt"]["mean"], stats["bt"]["std"], stats["bt"]["rmse"],
-        "K",
-        "Brightness temperature difference",
+        "T$_B$ difference", "K",
+        "Brightness temperature difference (sim − obs)",
         plot_folder / f"fig_bt_stats_{tag}",
     )
 
+    # --- difference distributions ------------------------------------------
     if "rad" in stats["quantities"]:
         plot_histogram_pcolormesh(
             wvn_obs, bin_centers["rad"], stats["rad"]["density"],
-            "Difference [W m$^{-2}$ Hz$^{-1}$ sr$^{-1}$]",
+            "radiance difference", unit_rad,
             "Radiance difference distribution (absolute, sim − obs)",
             plot_folder / f"fig_radiance_abs_hist_{tag}",
+            mean=stats["rad"]["mean"], std=stats["rad"]["std"],
         )
         plot_histogram_pcolormesh(
             wvn_obs, bin_centers["rel"], stats["rel"]["density"],
-            "Difference [%]",
+            "radiance difference", "%",
             "Radiance difference distribution (relative, sim − obs)",
             plot_folder / f"fig_radiance_rel_hist_{tag}",
+            mean=stats["rel"]["mean"], std=stats["rel"]["std"],
         )
 
     plot_histogram_pcolormesh(
         wvn_obs, bin_centers["bt"], stats["bt"]["density"],
-        "Difference [K]",
+        "T$_B$ difference", "K",
         "Brightness temperature difference distribution (sim − obs)",
         plot_folder / f"fig_bt_hist_{tag}",
+        mean=stats["bt"]["mean"], std=stats["bt"]["std"],
     )
 
 

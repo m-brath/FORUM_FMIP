@@ -32,8 +32,11 @@ Input data:
 
 Output:
     results/COMPARISON/comparison_stats_<run_name>_BTconvolved.nc
+    plot/comparison/fig_mean_bt_<run_name>_BTconvolved.png / .pdf
     plot/comparison/fig_bt_stats_<run_name>_BTconvolved.png / .pdf
     plot/comparison/fig_bt_hist_<run_name>_BTconvolved.png / .pdf
+    (same figure set as compare_convolved_with_obs.py, including the
+    mean-spectra figure with the +-1 std bands, only tagged differently)
 
 Example
 -------
