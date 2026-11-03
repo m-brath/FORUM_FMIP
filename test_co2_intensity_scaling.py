@@ -55,12 +55,15 @@ data_dir = script_dir.parent / "data"
 results_dir = script_dir.parent / "results" / "RADIANCE" / "co2_scale_test"
 plot_dir = script_dir.parent / "plot" / "comparison"
 
-# run variant: env CO2_SCALE_VARIANT = "baseline" (default) or "scaled"
+# run variant: env CO2_SCALE_VARIANT = "baseline" (default), "scaled", or
+# "exomol" (append ExoMol UCL-4000 hot-band lines to the CO2-626 block)
 variant = os.environ.get("CO2_SCALE_VARIANT", "baseline")
-assert variant in ("baseline", "scaled")
+assert variant in ("baseline", "scaled", "exomol")
 
-# patched catalog used by the "scaled" variant
-patched_catalog = script_dir.parent / "catalog_co2x10"
+# patched catalog used by the non-baseline variants
+patched_catalog = (script_dir.parent /
+                   {"scaled": "catalog_co2x10",
+                    "exomol": "catalog_co2exomol"}[variant])
 scale_range = (2398.0, 2520.0)     # cm^-1, documented in the file attrs
 scale_factor = 10.0
 
@@ -136,11 +139,11 @@ def run_variant():
 
     # --- LUT up front from the SAME atmospheres as the simulation ---------
     Flxsim = fsm.FluxSimulator(setup_name)
-    if variant == "scaled":
+    if variant != "baseline":
         point_at_patched_catalog()
     Flxsim.set_frequency_grid(f_grid)
     abs_species = frb.define_abs_species(Flxsim, species_list)
-    if variant == "scaled":
+    if variant != "baseline":
         point_at_patched_catalog()
     Flxsim.add_species(abs_species)
     Flxsim.emission = 1
@@ -166,11 +169,11 @@ def run_variant():
     for c0 in range(0, len(col_ids), chunk_size):
         c1 = min(c0 + chunk_size, len(col_ids))
         Flxsim = fsm.FluxSimulator(setup_name)
-        if variant == "scaled":
+        if variant != "baseline":
             point_at_patched_catalog()
         Flxsim.set_frequency_grid(f_grid)
         frb.define_abs_species(Flxsim, species_list)
-        if variant == "scaled":
+        if variant != "baseline":
             point_at_patched_catalog()
         Flxsim.add_species(abs_species)
         Flxsim.emission = 1
@@ -226,7 +229,7 @@ def run_variant():
                "setup_name": setup_name,
                "co2_intensity_scale_range_cm": f"{scale_range[0]}-{scale_range[1]}",
                "co2_intensity_scale_factor": scale_factor,
-               "catalog": str(patched_catalog) if variant == "scaled"
+               "catalog": str(patched_catalog) if variant != "baseline"
                          else "arts-cat-data-2.6.20",
                "note": "mini run for the CO2 nu3 band-edge causal test; "
                        "LUT from the subset atmospheres only"},
@@ -244,9 +247,13 @@ def compare_and_plot():
     import compare_convolved_with_obs as ccow
 
     files = {v: results_dir / f"Reference_BT_{v}_Nf{N_wvn}.nc"
-             for v in ("baseline", "scaled")}
-    if not all(f.exists() for f in files.values()):
+             for v in ("baseline", "scaled", "exomol")}
+    for v in list(files):
+        if not files[v].exists():
+            del files[v]
+    if "baseline" not in files:
         return
+    variants = [v for v in ("scaled", "exomol") if v in files]
 
     bt = {v: xr.open_dataset(f)["brightness_temperature"].values
           for v, f in files.items()}          # (N_ch, n_col)
@@ -277,16 +284,23 @@ def compare_and_plot():
     def prof(x):
         return np.nanmean(x, axis=1)
 
+    variant_color = {"scaled": ccow.palette["diff"],
+                     "exomol": "#1a7f37"}
+    variant_label = {"scaled": "mini, CO2 lines 2398-2520 x10",
+                     "exomol": "mini + ExoMol UCL-4000 hot lines"}
+    variant_short = {"scaled": "d_x10   ", "exomol": "d_exo   "}
+
     m = (wch >= 2340) & (wch <= 2530)
-    print("\n  wvn     full_run   mini_base   mini_x10      obs   "
-          "d_base  d_x10")
+    print("\n  wvn     full_run   mini_base       obs   "
+          + " ".join(v for v in variants))
     for lo in range(2360, 2520, 10):
         s = m & (wch >= lo) & (wch < lo + 10)
-        pb, ps, po = prof(bt["baseline"][s]), prof(bt["scaled"][s]), prof(obs[s])
+        pb, po = prof(bt["baseline"][s]), prof(obs[s])
         pf = prof(full[s]) if full is not None else np.full_like(pb, np.nan)
+        extra = " ".join(
+            f"{prof(bt[v][s]).mean() - po.mean():+8.2f}" for v in variants)
         print(f"  {lo:5.0f} {pf.mean():9.2f} {pb.mean():10.2f} "
-              f"{ps.mean():9.2f} {po.mean():8.2f} "
-              f"{pb.mean() - po.mean():+7.2f} {ps.mean() - po.mean():+7.2f}")
+              f"{po.mean():9.2f}   {extra}")
 
     ccow.apply_plot_style()
     fig, axes = plt.subplots(2, 1, figsize=(7.6, 7.2), sharex=True)
@@ -296,9 +310,9 @@ def compare_and_plot():
                 label="full run (Nf108951)")
     ax.plot(wch[m], prof(bt["baseline"][m]), color=ccow.palette["sim"],
             lw=ccow.line_width, label="mini baseline")
-    ax.plot(wch[m], prof(bt["scaled"][m]), color=ccow.palette["diff"],
-            lw=ccow.line_width,
-            label="mini, CO2 lines 2398-2520 x10")
+    for v in variants:
+        ax.plot(wch[m], prof(bt[v][m]), color=variant_color[v],
+                lw=ccow.line_width, label=variant_label[v])
     ax.plot(wch[m], prof(obs[m]), color=ccow.palette["obs"], ls="--",
             lw=ccow.line_width, label="IASI obs")
     ax.set_ylabel("Mean $T_B$ / K")
@@ -311,9 +325,10 @@ def compare_and_plot():
     ax.plot(wch[m], prof(bt["baseline"][m]) - prof(obs[m]),
             color=ccow.palette["sim"], lw=ccow.line_width,
             label="mini baseline - obs")
-    ax.plot(wch[m], prof(bt["scaled"][m]) - prof(obs[m]),
-            color=ccow.palette["diff"], lw=ccow.line_width,
-            label="mini x10 - obs")
+    for v in variants:
+        ax.plot(wch[m], prof(bt[v][m]) - prof(obs[m]),
+                color=variant_color[v], lw=ccow.line_width,
+                label=variant_label[v] + " - obs")
     ax.axhline(0, color="0.5", lw=0.8)
     ax.axvspan(*scale_range, color="0.85", zorder=0)
     ax.set_xlabel("Wavenumber / cm$^{-1}$")
@@ -322,8 +337,8 @@ def compare_and_plot():
     ax.legend(loc="upper left")
     for a in axes:
         a.grid(alpha=0.3)
-    fig.suptitle(r"CO$_2$ $\nu_3$ band-edge causal test: CO2 line "
-                 r"intensities 2398--2520 cm$^{-1}$ scaled $\times$10",
+    fig.suptitle(r"CO$_2$ $\nu_3$ band-edge causal tests: line-intensity "
+                 r"$\times$10 and ExoMol UCL-4000 hot-line append",
                  fontsize=11)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     plot_dir.mkdir(parents=True, exist_ok=True)
