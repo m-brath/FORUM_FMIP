@@ -11,7 +11,8 @@ plus sensor-response (IASI SRF) convolution to brightness temperature.
 - `results/` — NetCDF benchmark outputs (`RADIANCE/` radiance products, `LW/`
   spectral fluxes, `LMIX_TEST/` generated line-mixing test artifacts —
   shadow catalog trees + single-column test runs, `CO2_XSEC/` single-state CO₂
-  cross-section and line-wing-cutoff effect test products). Radiance runs are
+  cross-section and line-wing-cutoff effect test products, `CO2_REFINEMENT/`
+  single-column CO₂ atmospheric-profile refinement test products). Radiance runs are
   stored one folder per
   run/configuration: `results/RADIANCE/<run_name>/` with
   `run_name = <setup_name>_Nf<N_wvn>_Nza<N_za>`; the post-processing scripts
@@ -59,6 +60,9 @@ and `test.py` were removed) — do not introduce it.
 | `compare_btconvolved_with_obs.py` | Companion of `convolve_sensor_response_bt.py`: compares `Reference_BTconvolved_*` against `data/satdata.nc` by importing `compare_convolved_with_obs` (unmodified) and reusing its comparison machinery; outputs are tagged `<run_name>_BTconvolved` so the standard comparison stats/figures are never touched; run constants are `run_name` and `tag` |
 | `plot_lut_species_crosssections.py` | Optional diagnostic for the T_B comparison: reads `cache/<setup>/LUT.xml` + `data/atmdata.nc`; needs `ARTS_DATA_PATH`; no downstream consumer |
 | `co2_crosssection_cutoff_test.py` | Single-state CO₂ cross-section diagnostic for the 2398–2520 cm⁻¹ deficit: pure on-the-fly LBL (no FluxSimulator/`abs_lookup` on the main path) at 280 K / 1000 hPa, 2350–2550 cm⁻¹ at Δν̃ = 0.02, with `abs_lines_per_speciesCutoff` arms 25 (= benchmark 750 GHz) / 50 / 75 / 100 / 150 cm⁻¹ + untruncated → `results/CO2_XSEC/co2_xsection_280K_1000hPa_cutoffs.nc` (σ, absorption coefficient, ratio to the 25 cm⁻¹ arm, window integral, provenance) and `fig_co2_xsec_{spectra,ratios,cutoff_vs_wvn}.png` in `plot/co2_xsec/`; four self-check gates must all PASS (G1 lookup vs. on-the-fly, G2 Doppler-limit line peak, G3 σ monotonic in the cutoff, G4 half-Δν̃ resolution check); run constants at top; no downstream consumer |
+| `co2_dry_air_refinement_test.py` | Recalculates idx 12345 on the one-pass add-3 profile, 2398–2520 cm⁻¹ at 0.25 cm⁻¹, using corrected dry-air input and a forcibly rebuilt separate LUT; compares monochromatic TOA radiance/BT against the previous add-3 result → NetCDF in `results/CO2_REFINEMENT/` and figure in `plot/co2_refinement/` |
+| `compare_co2_dry_air_with_iasi.py` | Directly compares the old and corrected monochromatic add-3 BT spectra with IASI observations at matching channel centres, without sensor convolution; writes comparison NetCDF and figure alongside the CO₂ refinement products |
+| `compare_co2_iasi_los.py` | Reconstructs old and corrected add-3 atmospheres for idx 12345, reuses their individual LUTs and recomputes radiance at the observed LOS (user-confirmed signed local off-nadir degrees); checks nadir against prior results and directly compares both LOS spectra with IASI, without sensor convolution |
 | `co2_cutoff_tb_effect.py` | Radiative follow-up of `co2_crosssection_cutoff_test.py` for the 2398–2520 cm⁻¹ deficit: per-layer on-the-fly LBL absorption of column `atm_index` (again no FluxSimulator/`abs_lookup`), vertical LTE RTE → monochromatic T_B, IASI SRF convolution → sensor-level ΔT_B per cutoff arm (25/50/75/100/150 cm⁻¹ + untruncated) compared against the production sim−obs deficit read from `results/COMPARISON/comparison_stats_*.nc`, plus the log-interpolated cutoff that would close the deficit at 2405 cm⁻¹ → `results/CO2_XSEC/co2_cutoff_tb_effect_idx<N>.nc` and `fig_co2_xsec_{tb_effect,closure}_idx<N>.png` in `plot/co2_xsec/`; CO₂-**lines only** absorbers, so absolute T_B is warmer than the products (the production wing opacity is MT-CKD-continuum dominated) and only the arm differences are meaningful; gates G1–G4 (σ vs. the xsec-test products, τ→0 surface-Planck limit, τ and optically-thin T_B monotonic in the cutoff — saturated-core T_B exemptions reported, layer-grid convergence); run constants at top; no downstream consumer |
 | `co2_lmix_rosenkranz_test.py` | CO2 line-mixing sensitivity test for the 2398–2520 cm⁻¹ deficit: adapts the CO2-626 bands near the simulation window via `abs_lines_per_speciesAdaptOnTheFlyLineMixing` (ECS Rodrigues1997 + MeanAir bath, `rosenkranz_adaptation` = 0 / 1, `ByRovibLinearDipoleLineMixing` — the only ECS path defined for CO2) into shadow catalog trees `results/LMIX_TEST/catdata_<variant>/` (datapath pointed at them after every `FluxSimulator` construction), then runs production-style single-column (idx 12345) TOA radiance arms `none`/`ra0`/`ra1` (optional `ra1_nocutoff`) → `results/LMIX_TEST/<setup>_Nf<Nf>_Nza20/` + figures `fig_lmix_spectra.png`/`fig_lmix_diffs.png` in `plot/lmix_test/`; run constants at top (`atm_index`, window + `N_wvn`, `lmix_variants`, adaptation order/P0/t_grid); no downstream consumer |
 | `plot_lmix_report.py` | Report figures for the line-mixing test: reads the final-resolution arms `results/LMIX_TEST/co2_lmix_{none,ra0,ra1}_Nf4001_Nza20/` and adds the sensor-level view — SRF-convolved channel T_B vs. `satdata.nc` obs (operator from `frtmip_aux_functions`, only fully-covered channels), per-channel model−obs deficit, and the line-mixing shift of that deficit → `fig_report_*.png` in `plot/lmix_test/` (companion write-up: `plot/lmix_test/report_co2_line_mixing.md`); no downstream consumer |
@@ -66,6 +70,12 @@ and `test.py` were removed) — do not introduce it.
 
 ## Conventions & gotchas
 
+- **Gas mass ratios**: `prepare_data.py` assumes every input gas is in kg per
+  kg dry air. It converts all gases to moist-air mole fractions using the same
+  water-vapour dilution factor. The source HDF5 does not document this basis.
+  LUTs and simulation results made from the old conversion are stale; rebuild
+  every affected LUT or use new setup names, and rerun simulations. Do not mix
+  old and corrected products in a run folder.
 - **Run parameters are plain constants at the top of each script** (column
   subset, chunk size, `N_wvn`, angular grid, `recalc_lut`, refinement). Change
   those — there is no CLI/argument parsing.

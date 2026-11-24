@@ -146,7 +146,7 @@ def molecular_mass(formula: str) -> float:
 
 
 def get_species_masses(species: list[str]) -> dict[str, float]:
-    """Return a dict mapping each species formula to its molar mass in g mol⁻¹.
+    """Return a dict mapping each species formula to its molar mass in kg mol⁻¹.
 
     Parameters
     ----------
@@ -157,12 +157,7 @@ def get_species_masses(species: list[str]) -> dict[str, float]:
     Returns
     -------
     dict[str, float]
-        ``{formula: molar_mass_g_per_mol}`` for every entry in *species*.
-
-    Examples
-    --------
-    >>> get_species_masses(['H2O', 'CO2', 'O3'])
-    {'H2O': 18.015, 'CO2': 44.010, 'O3': 47.998}
+        ``{formula: molar_mass_kg_per_mol}`` for every entry in *species*.
     """
 
     output={}
@@ -406,52 +401,47 @@ def T_virtual(T,r_v):
     
     return Tv
 
-def mixingratio2vmr(r,Mx):
-    """
-    Convert mixing ratio to volume mixing ratio (VMR).
+def mixingratio2vmr(r, Mx, water_mixing_ratio):
+    """Convert dry-air mass mixing ratios to moist-air mole fractions.
+
     Parameters
     ----------
     r : float or array-like
-        Mixing ratio of the gas [kg/kg].
+        Mass of gas per mass of dry air [kg/kg].
     Mx : float
         Molar mass of the gas [kg/mol].
+    water_mixing_ratio : float or array-like
+        Mass of water vapour per mass of dry air [kg/kg].
+
     Returns
     -------
     float or array-like
-        Volume mixing ratio (VMR) of the gas [mol/mol].
+        Gas mole fraction in moist air [mol/mol].
+
     Notes
     -----
-    The conversion uses the molar mass of dry air (M_d) defined as a global
-    constant in the module. The formula used is:
-        VMR = r / (r + Mx / Md)
-    where Md is the molar mass of dry air [kg/mol].
-    Examples
-    --------
-    >>> # Convert water vapor mixing ratio to VMR
-    >>> r = 0.01  # kg/kg
-    >>> Mx = 18.015  # g/mol (water vapor)
-    >>> vmr = mixingratio2vmr(r, Mx)
+    Dry gases are already included in the dry-air mass. For water, pass
+    its mixing ratio as both r and water_mixing_ratio.
     """
-   
-    Md=M_d
-    
-    return r/(r+Mx/Md)
+    return (np.asarray(r) * M_d / Mx
+            / (1.0 + np.asarray(water_mixing_ratio) * M_d / M_W))
 
 
 def vmr2mixingratio(vmr, Mx):
     """
-    Convert volume mixing ratio (VMR) to mixing ratio. Inverse of
-    :func:`mixingratio2vmr`.
+    Convert water vapour VMR to its mass mixing ratio per dry-air mass.
+
+    Inverse of :func:`mixingratio2vmr` for water only.
     Parameters
     ----------
     vmr : float or array-like
-        Volume mixing ratio of the gas [mol/mol].
+        Water vapour volume mixing ratio [mol/mol].
     Mx : float
-        Molar mass of the gas, in the same units as M_d [kg/mol].
+        Molar mass of water, in the same units as M_d [kg/mol].
     Returns
     -------
     float or array-like
-        Mixing ratio of the gas [kg/kg].
+        Water mixing ratio [kg/kg dry air].
     Notes
     -----
     Inverting VMR = r / (r + Mx / Md) gives

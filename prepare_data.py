@@ -56,8 +56,10 @@ for spc in data['28gas_label']:
 # Convert each label to proper molecular-formula capitalisation
 species_name = fax.format_species_list(species_name)
 
-# Molar masses in g mol^-1 for each species
+# Assume all source gas mass ratios are kg of gas per kg of dry air.
+# Molar masses are in kg mol^-1, including CFC aliases.
 species_mass = fax.get_species_masses(species_name)
+r_v = data['h2o [kg_kg]'].values
 
 atmdata = {    
     'idx': np.arange(len(data['arsalat'])),
@@ -77,20 +79,13 @@ for var in variable_gases:
     #Molecular mass of the species in kg mol^-1
     spc_molmass, _ = fax.molecular_mass(spc_name)
     
-    atmdata[spc_name] = fax.mixingratio2vmr(data[var].values, spc_molmass)
+    atmdata[spc_name] = fax.mixingratio2vmr(data[var].values, spc_molmass, r_v)
 
-for i, spc in enumerate(data['28gas_label']):
-
-    spc_name = str(spc.values).replace('-', '')
-    spc_name = fax.format_molecular_formula(spc_name)
-    #Molecular mass of the species in kg mol^-1
-    spc_molmass, _ = fax.molecular_mass(spc_name)
-    spc_temp=fax.format_species_list([spc_name])[0]
-
-    atmdata[spc_temp] = fax.mixingratio2vmr(data['28gas [kg_kg]'].values[:,i,:], spc_molmass)
+for i, spc_name in enumerate(species_name):
+    atmdata[spc_name] = fax.mixingratio2vmr(
+        data['28gas [kg_kg]'].values[:, i, :], species_mass[spc_name], r_v)
 
 
-r_v=data['h2o [kg_kg]'].values
 atmdata['alt'] = fax.get_altitude(atmdata['p'], atmdata['t'], r_v)
 
 
@@ -154,7 +149,7 @@ def dict_to_dataset(d):
     return xr.Dataset(data_vars, coords=coords)
 
 
-def save_dict_as_netcdf(d, filename):
+def save_dict_as_netcdf(d, filename, attrs=None):
     """Save a dictionary of arrays as a netCDF file using xarray."""
     data_vars = {}
     for key, val in d.items():
@@ -167,7 +162,7 @@ def save_dict_as_netcdf(d, filename):
             data_vars[key] = xr.Variable(['idx', 'lev'], val)
         else:
             data_vars[key] = xr.Variable([f'dim{i}' for i in range(val.ndim)], val)
-    ds = xr.Dataset(data_vars)
+    ds = xr.Dataset(data_vars, attrs=attrs)
     ds.to_netcdf(filename)
     print(f"Saved: {filename}")
 
@@ -175,7 +170,12 @@ def save_dict_as_netcdf(d, filename):
 output_dir = os.path.join(script_dir, data_dir)
 os.makedirs(output_dir, exist_ok=True)
 
-save_dict_as_netcdf(atmdata,           os.path.join(output_dir, 'atmdata.nc'))
+save_dict_as_netcdf(
+    atmdata, os.path.join(output_dir, 'atmdata.nc'),
+    attrs={
+        "source_gas_mass_ratio_basis": "assumed kg of gas per kg of dry air",
+        "gas_volume_mixing_ratio_basis": "mol of gas per mol of moist air",
+    })
 save_dict_as_netcdf(sfcdata,           os.path.join(output_dir, 'sfcdata.nc'))
 save_dict_as_netcdf(surface_emissivity,os.path.join(output_dir, 'surface_emissivity.nc'))
 save_dict_as_netcdf(satdata,           os.path.join(output_dir, 'satdata.nc'))
