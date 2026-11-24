@@ -112,6 +112,10 @@ def main():
         raise ValueError("simulator angular grid does not contain 180 degrees")
     radiance = np.asarray(result["array_of_spectral_radiance_clearsky"][0])[
         :, -1, za_index, 0]
+    los = fax.load_iasi_los(frb.satdata_file, [atm_index])
+    radiance_los = fax.interpolate_to_iasi_los(
+        np.asarray(result["array_of_spectral_radiance_clearsky"][0])[None, :, -1, :, :],
+        za, result["azimuth_angle"], los)[0]
     bt = fax.radiance2brightness_temp(radiance, wvn_grid)
     if not np.all(np.isfinite(radiance)) or not np.all(np.isfinite(bt)) or \
             not np.all(np.isfinite(old_rad)) or not np.all(np.isfinite(old_bt)):
@@ -142,6 +146,22 @@ def main():
                "line_cutoff": "FluxSimulator cutoff=True",
                "angular_grid": f"N_za={N_za}, N_aa={N_aa}, TOA zenith=180 degrees"})
     ds.to_netcdf(output)
+    los_ds = ds.drop_vars(["radiance_old", "brightness_temperature_old",
+                           "brightness_temperature_difference"]).copy(deep=True)
+    los_ds["radiance_corrected"].values[:] = radiance_los
+    los_ds["brightness_temperature_corrected"].values[:] = \
+        fax.radiance2brightness_temp(radiance_los, wvn_grid)
+    los_ds.attrs.update({
+        "viewing_geometry": "iasi_los",
+        "observation_view_angle_deg": float(los[0]),
+        "arts_zenith_angle_deg": float(180 - abs(los[0])),
+        "viewing_interpolation": "linear in cosine of ARTS zenith angle",
+        "viewing_azimuth": "azimuth-independent, single simulated azimuth",
+        "angular_grid": f"N_za={N_za}, N_aa={N_aa}, IASI LOS",
+    })
+    los_output = results_folder / f"{setup_name}_iasi_los.nc"
+    los_ds.to_netcdf(los_output)
+    print(f"Saved IASI LOS result {los_output}")
 
     plot_folder.mkdir(parents=True, exist_ok=True)
     fig, axes = plt.subplots(2, 1, sharex=True, figsize=(10, 7))

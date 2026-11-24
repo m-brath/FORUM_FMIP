@@ -18,8 +18,8 @@ Behaviour
 * Same simulation setup as fmip_radiance_batch.py (longwave emission = 1,
   gas_scattering = False, no sun, reflectivity = 1 - emissivity interpolated
   onto the SIMULATION wavenumber grid -- here the sub grid of this chunk),
-  and the same TOA extraction (zenith angle 180 degrees, last level of the
-  surface-first level axis).
+  and the same TOA extraction at each IASI LOS, interpolated in cosine zenith
+  at the last level of the surface-first level axis.
 * The batch LUT is built for THIS chunk only: setup name
   "<setup_base>_<identifier>" -> own cache dir <cwd>/cache/<setup>/, LUT
   built on the chunk's sub frequency grid. Like fmip_radiance_batch.py it
@@ -32,8 +32,9 @@ Behaviour
   fmip_radiance_batch.py (one fresh FluxSimulator instance per chunk, LUT
   read from the cache with recalc=False).
 * Output: results/RADIANCE/<run_name>/Reference_radiance_TOA_Nf<N_chunk>_
-  Nza<N_za>_<setup>[_chunk###].nc, with the run sub folder taken from the
-  config ("run_name", falling back to the setup base name for old configs).
+  Nza<N_za>_<output_setup>_<identifier>[_chunk###].nc, with LOS metadata
+  for each idx. Generate configs with the current launcher; old configs are
+  rejected to avoid writing LOS data into a nadir run.
   convolve_sensor_response.py discovers these files recursively;
   merge_radiance_chunks.py re-assembles the full frequency grid.
 
@@ -52,6 +53,7 @@ import xarray as xr
 from pyarts import arts
 
 import FluxSimulator as fsm
+import frtmip_aux_functions as fax
 
 # helpers shared with the non-chunked benchmark (import is side-effect free:
 # fmip_radiance_batch.main() is __main__-guarded)
@@ -74,6 +76,7 @@ results_folder = script_dir.parent / "results" / "RADIANCE"
 atmdata_file = data_dir / "atmdata.nc"
 sfcdata_file = data_dir / "sfcdata.nc"
 surface_emissivity_file = data_dir / "surface_emissivity.nc"
+satdata_file = data_dir / "satdata.nc"
 
 
 # =============================================================================
@@ -89,13 +92,12 @@ def simulate_frequency_chunk(config):
 
     identifier = config["identifier"]
     flxsim_setup = config["flxsim_setup"]
+    if config.get("viewing_geometry") != "iasi_los":
+        raise ValueError("worker requires an IASI LOS config from the current launcher")
+    output_setup_name = config["output_setup_name"]
 
-    # run sub folder in results/RADIANCE/, shared by every frequency chunk of
-    # one launch (configs written by fmip_radiance_slurm_main.py carry it);
-    # for old configs without the key, fall back to the setup base name,
-    # i.e. flxsim_setup with the per-chunk identifier stripped
-    run_name = config.get("run_name") or flxsim_setup.removesuffix(
-        f"_{identifier}")
+    # All frequency chunks of the launch share this separate LOS run folder.
+    run_name = config["run_name"]
     run_results_folder = results_folder / run_name
 
     f_grid = np.asarray(config["f_grid"], dtype=np.float64)
@@ -127,9 +129,15 @@ def simulate_frequency_chunk(config):
             f"in the input data ({n_total})"
         )
     end_column = min(start_column + int(config["n_columns"]), n_total)
-    col_ids = list(range(start_column, end_column))   # original idx values
+    col_ids = atmdata["idx"].values[start_column:end_column]
+    for name, dataset in (("surface", sfcdata), ("emissivity", emissivity)):
+        if not np.array_equal(dataset["idx"].values[start_column:end_column], col_ids):
+            raise ValueError(f"{name} and atmospheric column indices do not match")
     n_to_run = len(col_ids)
     n_chunks = int(np.ceil(n_to_run / chunk_size))
+    if N_aa != 1:
+        raise ValueError("IASI LOS requires a single azimuth and no scattering")
+    los_subset = fax.load_iasi_los(satdata_file, col_ids)
 
     # atmospheric species in the input data (volume mixing ratios)
     species_list_of_data = [
@@ -326,20 +334,15 @@ def simulate_frequency_chunk(config):
             pressure[i] = results["array_of_pressure"][i]
             altitude[i] = results["array_of_altitude"][i]
 
-        # TOA slice: highest model level (last index, since surface-first).
-        # Keep only the radiance at zenith angle 180 degrees.
-        za_index = int(np.argmin(np.abs(za_grid - 180.0)))
-        if not np.isclose(za_grid[za_index], 180.0):
-            raise AssertionError(
-                f"zenith angle grid does not contain 180 degrees: {za_grid}"
-            )
-        toa_rad = field[:, :, -1, za_index, 0]       # (idx, N_wvn)
+        chunk_los = los_subset[c0:c1]
+        toa_rad = fax.interpolate_to_iasi_los(
+            field[:, :, -1, :, :], za_grid, aa_grid, chunk_los)
 
         # quick sanity check for the first profile of the chunk
         r0 = toa_rad[0]
         print(f"  TOA spectral radiance (profile {col_ids[c0]}): "
               f"shape {r0.shape}, min {r0.min():.3e}, max {r0.max():.3e}")
-        print(f"  selected zenith angle: {za_grid[za_index]} degrees\n")
+        print(f"  IASI off-nadir angle: {chunk_los[0]:.3f} degrees\n")
 
         # ---------------------------------------------------------------------
         # export the chunk results
@@ -351,8 +354,7 @@ def simulate_frequency_chunk(config):
                     (["frequency", "idx"],
                      toa_rad.transpose(1, 0),
                      {"units": "W m^-2 Hz^-1 sr^-1 "
-                               "(ARTS/DISORT spectral radiance)",
-                      "zenith_angle": float(za_grid[za_index])}),
+                               "(ARTS/DISORT spectral radiance)"}),
                 "altitude_min": (["idx"], altitude.min(axis=1),
                                   {"units": "m"}),
                 "altitude_max": (["idx"], altitude.max(axis=1),
@@ -366,6 +368,7 @@ def simulate_frequency_chunk(config):
                                 {"units": "cm^-1"}),
             },
         )
+        fax.add_iasi_los_metadata(ds, chunk_los)
 
         if export_full_field:
             # full altitude-resolved cube, (frequency, idx, lev, zenith, azim),
@@ -379,7 +382,7 @@ def simulate_frequency_chunk(config):
 
         fname = (
             f"Reference_radiance_TOA_Nf{N_wvn_out}"
-            f"_Nza{N_za}_{flxsim_setup}"
+            f"_Nza{N_za}_{output_setup_name}_{identifier}"
         )
         if n_chunks > 1:
             fname += f"_chunk{ck:03d}"

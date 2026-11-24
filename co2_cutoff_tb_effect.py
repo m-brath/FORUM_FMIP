@@ -117,6 +117,9 @@ wvn_reference = 2405.0
 comparison_stats_file = (script_dir.parent / "results" / "COMPARISON"
                          / "comparison_stats_fmip_radiance_batch"
                          "_slurm_Nf108951_Nza20.nc")
+los_comparison_stats_file = (script_dir.parent / "results" / "COMPARISON"
+                             / "comparison_stats_fmip_radiance_batch"
+                             "_slurm_iasi_los_Nf108951_Nza20.nc")
 
 # single-state cross-section reference produced by
 # co2_crosssection_cutoff_test.py (gate G1); skipped if absent
@@ -387,15 +390,16 @@ def _mark_deficit(ax):
     ax.axvspan(*deficit_range_cm, color=ccow.palette["shade"], zorder=0)
 
 
-def figure_tb_effect(chan, dTb, deficit_required, tau, wvn):
+def figure_tb_effect(chan, dTb, deficit_required, tau, wvn, suffix=""):
     fig, axes = plt.subplots(2, 1, figsize=(8.4, 7.4))
 
     ax = axes[0]
     for cut_cm in cutoffs_cm:
         ax.plot(chan, dTb[cut_cm], color=arm_colors[cut_cm],
                 lw=ccow.line_width, label=arm_label(cut_cm))
-    ax.plot(chan, deficit_required, color="0.15", lw=1.6, ls="--",
-            label=r"required $-({\rm sim}-{\rm obs})$, benchmark")
+    if deficit_required is not None:
+        ax.plot(chan, deficit_required, color="0.15", lw=1.6, ls="--",
+                label=r"required $-({\rm sim}-{\rm obs})$, benchmark")
     _mark_deficit(ax)
     ccow.annotate_spectral_features(ax, shade_window=False)
     ax.axhline(0, color="0.5", lw=0.8)
@@ -420,7 +424,7 @@ def figure_tb_effect(chan, dTb, deficit_required, tau, wvn):
                  "sensor-level $T_B$ effect and CO$_2$ line opacity",
                  fontsize=11)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
-    fig_file = plot_folder / f"fig_co2_xsec_cutoff_tb_effect_idx{atm_index}.png"
+    fig_file = plot_folder / f"fig_co2_xsec_cutoff_tb_effect_idx{atm_index}{suffix}.png"
     fig.savefig(fig_file, dpi=200)
     plt.close(fig)
     print(f"  wrote {fig_file}")
@@ -587,7 +591,10 @@ def main():
         print("G2 FAILED -- stop")
         return 1
 
+    los = float(fax.load_iasi_los(frb.satdata_file, [atm_index])[0])
+    mu = np.cos(np.deg2rad(abs(los)))
     tau, tb_mono, I_mono = {}, {}, {}
+    tau_los, tb_mono_los, I_mono_los = {}, {}, {}
     for cut_cm in cutoffs_cm:
         t0 = time.time()
         set_cutoff(ws, cut_cm)
@@ -595,6 +602,10 @@ def main():
         for l in range(pl.size):
             dtau[:, l] = lbl_absorption(ws, pl[l], tl[l], vl[l]) * dl[l]
         I, tau_col = integrate_rte(dtau, tl, T_sfc, f_grid)
+        I_los, tau_col_los = integrate_rte(dtau / mu, tl, T_sfc, f_grid)
+        tau_los[cut_cm] = tau_col_los
+        tb_mono_los[cut_cm] = fax.radiance2brightness_temp(I_los, wvn)
+        I_mono_los[cut_cm] = I_los
         tau[cut_cm], tb_mono[cut_cm], I_mono[cut_cm] = (
             tau_col, fax.radiance2brightness_temp(I, wvn), I)
         print(f"  arm {arm_short(cut_cm):>7} cm^-1 ({time.time()-t0:6.1f} s): "
@@ -616,6 +627,11 @@ def main():
         rad_c = fax.convolve_with_srf_to_channels(I_mono[cut_cm], operator)[keep]
         tb_chan[cut_cm] = fax.radiance2brightness_temp(rad_c, chan)
     dTb = {c: tb_chan[c] - tb_chan[25] for c in cutoffs_cm}
+    tb_chan_los = {}
+    for cut_cm in cutoffs_cm:
+        rad_c = fax.convolve_with_srf_to_channels(I_mono_los[cut_cm], operator)[keep]
+        tb_chan_los[cut_cm] = fax.radiance2brightness_temp(rad_c, chan)
+    dTb_los = {c: tb_chan_los[c] - tb_chan_los[25] for c in cutoffs_cm}
     print(f"  sensor grid: {chan.size} fully-covered IASI channels "
           f"({chan.min():.1f}-{chan.max():.1f} cm^-1)")
 
@@ -638,6 +654,8 @@ def main():
              "G3": gate_g3(np.stack([tau[c] for c in cutoffs_cm], axis=1),
                            np.stack([tb_mono[c] for c in cutoffs_cm], axis=1)),
              "G4": gate_g4(cutoffs_cm)}
+    los_g3 = gate_g3(np.stack([tau_los[c] for c in cutoffs_cm], axis=1),
+                     np.stack([tb_mono_los[c] for c in cutoffs_cm], axis=1))
     print("-" * 78)
     print("gate summary: " + ", ".join(f"{k}={'PASS' if v else 'FAIL'}"
                                        for k, v in gates.items())
@@ -698,6 +716,53 @@ def main():
                   layers, T_sfc, gates)
     figure_tb_effect(chan, dTb, deficit_required, tau, wvn)
     figure_closure(chan, dTb, deficit_required)
+
+    cuts_num = np.array([-1.0 if c is None else float(c) for c in cutoffs_cm])
+    deficit_los = None
+    if los_comparison_stats_file.is_file():
+        with xr.open_dataset(los_comparison_stats_file) as los_stats:
+            if los_stats.attrs.get("viewing_geometry") != "iasi_los":
+                raise ValueError("LOS comparison statistics lack IASI LOS provenance")
+            stats_wvn = los_stats["wavenumber"].values
+            k_los = np.abs(stats_wvn[None, :] - chan[:, None]).argmin(axis=1)
+            if np.abs(stats_wvn[k_los] - chan).max() > 1e-6:
+                raise ValueError("LOS comparison and sensor channel grids differ")
+            deficit_los = -los_stats["diff_mean_bt"].values[k_los]
+
+    los_ds = xr.Dataset(
+        {
+            "tau_column_lines_vertical": (["wavenumber", "cutoff"],
+                np.stack([tau[c] for c in cutoffs_cm], axis=1), {"units": "-"}),
+            "tau_column_lines_slant": (["wavenumber", "cutoff"],
+                np.stack([tau_los[c] for c in cutoffs_cm], axis=1), {"units": "-"}),
+            "brightness_temperature_mono": (["wavenumber", "cutoff"],
+                np.stack([tb_mono_los[c] for c in cutoffs_cm], axis=1), {"units": "K"}),
+            "brightness_temperature_channel": (["channel", "cutoff"],
+                np.stack([tb_chan_los[c] for c in cutoffs_cm], axis=1), {"units": "K"}),
+            "delta_tb_vs_25cm": (["channel", "cutoff"],
+                np.stack([dTb_los[c] for c in cutoffs_cm], axis=1), {"units": "K"}),
+        },
+        coords={"wavenumber": ("wavenumber", wvn, {"units": "cm^-1"}),
+                "channel": ("channel", chan, {"units": "cm^-1"}),
+                "cutoff": ("cutoff", cuts_num, {"units": "cm^-1"})},
+        attrs={"atm_index": int(atm_index), "viewing_geometry": "iasi_los",
+               "observation_view_angle_deg": los,
+               "arts_zenith_angle_deg": 180.0 - abs(los),
+               "method": "plane-parallel LTE slant path, dtau_vertical / cos(off-nadir); CO2 lines only",
+               "comparison_note": ("production LOS aggregate statistics"
+                                   if deficit_los is not None else
+                                   "No LOS production statistics available; nadir reference excluded"),
+               "gates": ", ".join(f"{k}={'PASS' if v else 'FAIL'}"
+                                  for k, v in {**gates, "G3": los_g3}.items())})
+    if deficit_los is not None:
+        los_ds["deficit_required"] = ("channel", deficit_los, {"units": "K"})
+        los_ds.attrs["deficit_source"] = los_comparison_stats_file.name
+    los_out = results_folder / f"co2_cutoff_tb_effect_idx{atm_index}_iasi_los.nc"
+    los_ds.to_netcdf(los_out)
+    print(f"  exported {los_out}")
+    figure_tb_effect(chan, dTb_los, deficit_los, tau_los, wvn, suffix="_iasi_los")
+    if deficit_los is not None:
+        figure_closure(chan, dTb_los, deficit_los, suffix="_iasi_los")
 
     print(f"\ntotal wall time: {time.time() - t_start:.1f} s")
     return 0

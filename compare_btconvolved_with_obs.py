@@ -170,7 +170,8 @@ def main():
     # (BT-only files -> brightness-temperature comparison; the tag keeps all
     # outputs separate from the Reference_convolved_* comparison)
     # -------------------------------------------------------------------------
-    stats = cco.run_comparison(chunk_files, obs_Tb_values, wvn_obs, tag)
+    stats = cco.run_comparison(chunk_files, obs_Tb_values, wvn_obs, tag,
+                               obs_idx=satdata["idx"].values)
 
     if cco.export_stats:
         cco.export_stats(stats, wvn_obs,

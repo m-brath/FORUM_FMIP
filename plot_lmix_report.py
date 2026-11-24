@@ -49,12 +49,16 @@ script_dir = pathlib.Path(__file__).parent.resolve()
 data_dir = script_dir.parent / "data"
 lmix_root = script_dir.parent / "results" / "LMIX_TEST"
 plot_folder = script_dir.parent / "plot" / "lmix_test"
+viewing_geometry = "iasi_los"  # "iasi_los" or "nadir"
+suffix = "_iasi_los" if viewing_geometry == "iasi_los" else ""
+if viewing_geometry not in ("iasi_los", "nadir"):
+    raise ValueError(f"unsupported viewing geometry {viewing_geometry}")
 
 # final-resolution arms produced by co2_lmix_rosenkranz_test.py
 arms = {
-    "none": "co2_lmix_none_Nf4001_Nza20",
-    "ra0": "co2_lmix_ra0_Nf4001_Nza20",
-    "ra1": "co2_lmix_ra1_Nf4001_Nza20",
+    "none": f"co2_lmix_none{suffix}_Nf4001_Nza20",
+    "ra0": f"co2_lmix_ra0{suffix}_Nf4001_Nza20",
+    "ra1": f"co2_lmix_ra1{suffix}_Nf4001_Nza20",
 }
 
 # spectral regions of interest [cm^-1]
@@ -82,6 +86,9 @@ def load_arm(folder):
             f"expected exactly one Reference_radiance_TOA_*.nc in {folder}, "
             f"found {len(ncs)}")
     ds = xr.open_dataset(ncs[0])
+    signature = fax.viewing_geometry_signature(ds)
+    if (signature[0] == "iasi_los") != (viewing_geometry == "iasi_los"):
+        raise ValueError(f"{ncs[0]} has unexpected viewing geometry")
     wvn = ds["wavenumber"].values
     rad = ds["spectral_radiance_TOA"].values[:, 0]   # single column
     return wvn, rad
@@ -198,7 +205,7 @@ def main():
                   "(where line mixing acts)")
 
     fig.tight_layout()
-    out = plot_folder / "fig_report_lmix_spectra.png"
+    out = plot_folder / f"fig_report_lmix_spectra{suffix}.png"
     fig.savefig(out, dpi=200)
     plt.close(fig)
     print(f"wrote {out}")
@@ -241,7 +248,7 @@ def main():
                   "(note the 15x finer $\\Delta T_B$ scale)")
 
     fig.tight_layout()
-    out = plot_folder / "fig_report_lmix_deltas.png"
+    out = plot_folder / f"fig_report_lmix_deltas{suffix}.png"
     fig.savefig(out, dpi=200)
     plt.close(fig)
     print(f"wrote {out}")
@@ -298,7 +305,7 @@ def main():
                   "$\\leq$0.1 K inside the window (fine scale)")
 
     fig.tight_layout()
-    out = plot_folder / "fig_report_channel_deficit.png"
+    out = plot_folder / f"fig_report_channel_deficit{suffix}.png"
     fig.savefig(out, dpi=200)
     plt.close(fig)
     print(f"wrote {out}")

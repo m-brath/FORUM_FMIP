@@ -130,8 +130,9 @@ def setup_name(variant):
     return f"{setup_base}_{variant}_Nf{N_wvn}"
 
 
-def run_folder(variant):
-    return results_base / f"{setup_base}_{variant}_Nf{N_wvn}_Nza{N_za}"
+def run_folder(variant, los=False):
+    suffix = "_iasi_los" if los else ""
+    return results_base / f"{setup_base}_{variant}{suffix}_Nf{N_wvn}_Nza{N_za}"
 
 
 def shadow_cat_dir(variant):
@@ -327,6 +328,10 @@ def run_arm(variant, ra, f_grid, wvn_grid, atm, T_surf, geo, reflectivity,
     # (frequency, idx) TOA slice, surface-first level axis -> TOA = last
     toa_rad = np.array(results["array_of_spectral_radiance_clearsky"][0]
                        )[:, -1, za_index, 0]
+    los = fax.load_iasi_los(frb.satdata_file, [atm_index])
+    toa_los = fax.interpolate_to_iasi_los(
+        np.asarray(results["array_of_spectral_radiance_clearsky"][0])[None, :, -1, :, :],
+        za_grid, results["azimuth_angle"], los)[0]
     altitude = np.array(results["array_of_altitude"][0])
     print(f"  TOA radiance at za={za_grid[za_index]:.1f} deg: "
           f"min {toa_rad.min():.3e}, max {toa_rad.max():.3e}")
@@ -381,7 +386,16 @@ def run_arm(variant, ra, f_grid, wvn_grid, atm, T_surf, geo, reflectivity,
                          f"_Nza{N_za}_co2_lmix_{variant}.nc")
     ds.to_netcdf(str(out_file))
     print(f"  exported {out_file}\n")
-    return ds
+    los_ds = ds.copy(deep=True)
+    los_ds["spectral_radiance_TOA"].values[:, 0] = toa_los
+    del los_ds["spectral_radiance_TOA"].attrs["zenith_angle"]
+    fax.add_iasi_los_metadata(los_ds, los)
+    los_folder = run_folder(variant, los=True)
+    los_folder.mkdir(parents=True, exist_ok=True)
+    los_file = los_folder / out_file.name
+    los_ds.to_netcdf(str(los_file))
+    print(f"  exported {los_file}\n")
+    return ds, los_ds
 
 
 # =============================================================================
@@ -451,7 +465,7 @@ def gate_g2_none_vs_production(ds_none):
           f"{d_grid.max():.4e} -- grid-offset artifact, not physics")
 
 
-def make_plots(arms):
+def make_plots(arms, suffix=""):
     """
     fig_lmix_spectra.png : monochromatic TOA radiance + Planck BT of all
                            arms, IASI obs T_B of the column as context
@@ -510,7 +524,7 @@ def make_plots(arms):
                  f"{atm_index}: monochromatic TOA radiance", fontsize=11)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     plot_dir.mkdir(parents=True, exist_ok=True)
-    fig_file = plot_dir / "fig_lmix_spectra.png"
+    fig_file = plot_dir / f"fig_lmix_spectra{suffix}.png"
     fig.savefig(fig_file, dpi=200)
     plt.close(fig)
     print(f"  wrote {fig_file}")
@@ -547,7 +561,7 @@ def make_plots(arms):
     fig.suptitle(r"$T_B$ (monochromatic) line-mixing increments, "
                  f"FMIP column idx {atm_index}", fontsize=11)
     fig.tight_layout(rect=(0, 0, 1, 0.94))
-    fig_file = plot_dir / "fig_lmix_diffs.png"
+    fig_file = plot_dir / f"fig_lmix_diffs{suffix}.png"
     fig.savefig(fig_file, dpi=200)
     plt.close(fig)
     print(f"  wrote {fig_file}")
@@ -656,11 +670,12 @@ def main():
     # ------------------------------------------------------------------
     # simulate all arms
     # ------------------------------------------------------------------
-    arms = {}
+    arms, los_arms = {}, {}
     for variant, ra in arms_def.items():
         use_cutoff = cutoff and not (variant == "ra1_nocutoff")
-        arms[variant] = run_arm(variant, ra, f_grid, wvn_grid, atm, T_surf,
-                                geo, reflectivity, species_list, use_cutoff)
+        arms[variant], los_arms[variant] = run_arm(
+            variant, ra, f_grid, wvn_grid, atm, T_surf,
+            geo, reflectivity, species_list, use_cutoff)
 
     # ------------------------------------------------------------------
     # gates / diagnostics / plots
@@ -670,6 +685,9 @@ def main():
     print_gate_g3(arms)
     print("-" * 70)
     make_plots(arms)
+    print("IASI LOS line-mixing increments:")
+    print_gate_g3(los_arms)
+    make_plots(los_arms, suffix="_iasi_los")
 
     print(f"total wall time: {time.time() - t_start:.1f} s")
 

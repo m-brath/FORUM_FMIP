@@ -57,7 +57,9 @@ Notes
   (convolve_sensor_response.py) are exported; the BT-space diagnostic of
   convolve_sensor_response_bt.py is a different product and is skipped.
 * Variables are carried through unchanged (brightness_temperature, plus
-  spectral_radiance_convolved if the convolve run exported it).  The data
+  spectral_radiance_convolved if the convolve run exported it), including
+  per-column IASI LOS and viewing zenith when present. Mixed LOS and nadir
+  chunks are rejected. The data
   are loaded and concatenated in memory (the full-SLURM BT product is
   ~1.3 GB float64), which needs roughly twice the file size in RAM.
 * The number of atmospheric levels reported is the one the simulation
@@ -79,6 +81,7 @@ import platform
 
 import numpy as np
 import xarray as xr
+import frtmip_aux_functions as fax
 
 
 # =============================================================================
@@ -250,6 +253,7 @@ def main():
     # -------------------------------------------------------------------------
     print("\nLoading and concatenating...")
     datasets = []
+    geometry = None
     for f in files:
         ds = xr.open_dataset(f)
         if "brightness_temperature" not in ds and \
@@ -259,6 +263,11 @@ def main():
                 f"spectral_radiance_convolved found -- not a product of "
                 f"convolve_sensor_response.py?"
             )
+        signature = fax.viewing_geometry_signature(ds)
+        if geometry is None:
+            geometry = signature
+        elif signature != geometry:
+            raise ValueError(f"{f.name}: viewing geometry differs between chunks")
         datasets.append(ds)
     ds_all = xr.concat(datasets, dim="idx")
     for ds in datasets:
@@ -267,6 +276,8 @@ def main():
     wvn = ds_all.coords["wavenumber"].values
     freq = ds_all.coords["frequency"].values
     idx = ds_all.coords["idx"].values
+    if np.unique(idx).size != idx.size:
+        raise ValueError("convolved chunks contain duplicate column indices")
     n_channels = wvn.size
     n_columns = idx.size
     if not np.array_equal(idx, np.arange(n_columns)):
@@ -285,6 +296,10 @@ def main():
     # -------------------------------------------------------------------------
     print("\nCollecting run metadata...")
     attrs = {}
+    for key in ("viewing_geometry", "viewing_angle_source",
+                "viewing_interpolation", "viewing_azimuth"):
+        if key in ds_all.attrs:
+            attrs[key] = ds_all.attrs[key]
 
     # -- run identification ---------------------------------------------------
     attrs["run_name"] = run_name

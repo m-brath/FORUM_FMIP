@@ -105,6 +105,7 @@ import re
 import numpy as np
 import xarray as xr
 import scipy.constants as scc
+import frtmip_aux_functions as fax
 
 import matplotlib
 # matplotlib.use("Agg")
@@ -734,7 +735,7 @@ def plot_histogram_pcolormesh(wvn, bin_centers, density, symbol, ylabel_unit,
 # %% comparison for one setup
 # =============================================================================
 
-def run_comparison(chunk_files, obs_Tb_values, wvn_obs, tag):
+def run_comparison(chunk_files, obs_Tb_values, wvn_obs, tag, obs_idx=None):
     """
     Run the streaming comparison for one simulation run.
 
@@ -762,11 +763,30 @@ def run_comparison(chunk_files, obs_Tb_values, wvn_obs, tag):
     quantities = None
     sel = None
     wvn_ref = None
+    geometry = None
+    if obs_idx is None:
+        obs_idx = np.arange(obs_Tb_values.shape[0])
+    obs_idx = np.asarray(obs_idx)
+    if (obs_idx.ndim != 1 or obs_idx.size != obs_Tb_values.shape[0]
+            or np.unique(obs_idx).size != obs_idx.size):
+        raise ValueError("observation idx values must be unique and match observations")
+    obs_positions = {value: i for i, value in enumerate(obs_idx)}
+
+    def observation_positions(idx):
+        missing = [value for value in idx if value not in obs_positions]
+        if missing:
+            raise ValueError(f"no observation for simulation idx {missing[:5]}")
+        return np.array([obs_positions[value] for value in idx], dtype=int)
 
     # Pass 1: running statistics + subsample for the radiance hist range
     print("  Pass 1: accumulating mean / std / RMSE statistics...")
     for ck, chunk_file in enumerate(chunk_files):
         ds = xr.open_dataset(chunk_file)
+        signature = fax.viewing_geometry_signature(ds)
+        if geometry is None:
+            geometry = signature
+        elif signature != geometry:
+            raise ValueError(f"{chunk_file}: inconsistent viewing geometry")
         wvn, freq, idx, sim_rad, sim_bt = extract_chunk_arrays(ds)
         ds.close()
 
@@ -806,7 +826,7 @@ def run_comparison(chunk_files, obs_Tb_values, wvn_obs, tag):
             sim_rad = sim_rad[sel, :]
         sim_bt = sim_bt[sel, :]
 
-        obs_tb = obs_Tb_values[idx, :]  # (N_idx, N_wvn)
+        obs_tb = obs_Tb_values[observation_positions(idx), :]  # (N_idx, N_wvn)
         d_rad, d_rel, d_bt, fields = compute_differences(
             sim_rad, sim_bt, obs_tb.T, freq_c
         )
@@ -871,7 +891,7 @@ def run_comparison(chunk_files, obs_Tb_values, wvn_obs, tag):
             sim_rad = sim_rad[sel, :]
         sim_bt = sim_bt[sel, :]
 
-        obs_tb = obs_Tb_values[idx, :]
+        obs_tb = obs_Tb_values[observation_positions(idx), :]
         d_rad, d_rel, d_bt, _ = compute_differences(sim_rad, sim_bt,
                                                     obs_tb.T, freq_c)
 
@@ -886,6 +906,7 @@ def run_comparison(chunk_files, obs_Tb_values, wvn_obs, tag):
 
     # Finalize statistics
     stats = {"tag": tag, "quantities": quantities, "bins": bin_configs,
+             "viewing_geometry": geometry[0],
              "hist": hists, "n_columns": counts["bt"], "fields": {}}
     for q in quantities:
         mean, std, rmse = finalize_stats(counts[q], sums[q], sum_sqs[q])
@@ -952,6 +973,7 @@ def export_stats(stats, wvn_obs, out_file):
     out_ds.attrs["difference"] = "simulation - observation"
     out_ds.attrs["setup"] = stats["tag"]
     out_ds.attrs["obs_file"] = satdata_file.name
+    out_ds.attrs["viewing_geometry"] = stats.get("viewing_geometry", "unknown")
     out_ds.to_netcdf(str(out_file))
     print(f"  Exported {out_file}")
 
@@ -1084,7 +1106,8 @@ def main():
             f"Run convolve_sensor_response.py first."
         )
 
-    stats = run_comparison(chunk_files, obs_Tb_values, wvn_obs, run_name)
+    stats = run_comparison(chunk_files, obs_Tb_values, wvn_obs, run_name,
+                           obs_idx=satdata["idx"].values)
 
     if export_stats:
         export_stats(stats, wvn_obs,

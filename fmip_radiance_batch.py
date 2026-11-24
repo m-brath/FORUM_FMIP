@@ -18,10 +18,11 @@ Input data: the same files as used by fmip_lw_benchmark_batch.py
     atmdata.nc             columns (idx) x levels (lev), TOA-first
     sfcdata.nc             surface temperature, elevation, lat/lon per column
     surface_emissivity.nc  per-column spectral emissivity on a fixed wvn grid
+    satdata.nc             signed local off-nadir IASI angles
 
 Result of interest
 ------------------
-The top-of-atmosphere (TOA) spectral radiance at zenith angle 180 degrees,
+The TOA spectral radiance interpolated in cosine zenith to each IASI LOS,
 plus the minimum and maximum altitude of every column:
     spectral_radiance_TOA  (frequency, idx)
     altitude_min, altitude_max  (idx)
@@ -58,8 +59,11 @@ Notes
   batch shares setup_name = fmip_radiance_batch). Delete the cache folder
   manually to force a rebuild if the spectrum or species setup is changed.
 * Output: every run writes to its own sub folder
-  results/RADIANCE/<run_name>/ with run_name = <setup_name>_Nf<N_wvn>_Nza<N_za>,
-  so different configurations do not mix (see the results folder constant).
+  results/RADIANCE/<run_name>/ with run_name =
+  <setup_name>_iasi_los_Nf<N_wvn>_Nza<N_za>, separate from older nadir runs.
+  The signed observation angle and ARTS viewing zenith are recorded per idx.
+  The LUT setup name is unchanged. The LOS assumes azimuth independence and
+  requires the single-azimuth, no-sun, no-scattering configuration.
 * Radiance units: the stored radiance is the raw ARTS/DISORT spectral
   radiance (W m^-2 Hz^-1 sr^-1). Confirm against a first run and adjust the
   NetCDF attribute if your convention differs.
@@ -151,7 +155,8 @@ setup_name = "fmip_radiance_batch"
 # results/RADIANCE/, named after the run identity
 # (FluxSimulator setup name + frequency/angular grid)
 # -----------------------------------------------------------------------------
-run_name = f"{setup_name}_Nf{N_wvn}_Nza{N_za}"
+output_setup_name = f"{setup_name}_iasi_los"
+run_name = f"{output_setup_name}_Nf{N_wvn}_Nza{N_za}"
 results_folder = (script_dir.parent / "results" / "RADIANCE" / run_name)
 
 
@@ -403,9 +408,15 @@ def main():
             f"in the input data ({n_total})"
         )
     end_column = min(start_column + n_columns, n_total)
-    col_ids = list(range(start_column, end_column))     # original idx values
+    col_ids = atmdata["idx"].values[start_column:end_column]
+    for name, dataset in (("surface", sfcdata), ("emissivity", emissivity)):
+        if not np.array_equal(dataset["idx"].values[start_column:end_column], col_ids):
+            raise ValueError(f"{name} and atmospheric column indices do not match")
     n_to_run = len(col_ids)
     n_chunks = int(np.ceil(n_to_run / chunk_size))
+    if N_aa != 1:
+        raise ValueError("IASI LOS requires a single azimuth and no scattering")
+    los_subset = fax.load_iasi_los(satdata_file, col_ids)
 
     # atmospheric species in the input data (volume mixing ratios)
     species_list_of_data = [
@@ -612,20 +623,16 @@ def main():
             pressure[i] = results["array_of_pressure"][i]
             altitude[i] = results["array_of_altitude"][i]
 
-        # TOA slice: highest model level (last index, since surface-first).
-        # Keep only the radiance at zenith angle 180 degrees.
-        za_index = int(np.argmin(np.abs(za_grid - 180.0)))
-        if not np.isclose(za_grid[za_index], 180.0):
-            raise AssertionError(
-                f"zenith angle grid does not contain 180 degrees: {za_grid}"
-            )
-        toa_rad = field[:, :, -1, za_index, 0]       # (idx, N_wvn)
+        # TOA is the last level; interpolate in cosine of zenith per column.
+        chunk_los = los_subset[c0:c1]
+        toa_rad = fax.interpolate_to_iasi_los(
+            field[:, :, -1, :, :], za_grid, aa_grid, chunk_los)
 
         # quick sanity check for the first profile of the chunk
         r0 = toa_rad[0]
         print(f"  TOA spectral radiance (profile {col_ids[c0]}): "
               f"shape {r0.shape}, min {r0.min():.3e}, max {r0.max():.3e}")
-        print(f"  selected zenith angle: {za_grid[za_index]} degrees\n")
+        print(f"  IASI off-nadir angle: {chunk_los[0]:.3f} degrees\n")
 
         # ---------------------------------------------------------------------
         # export the chunk results
@@ -637,8 +644,7 @@ def main():
                     (["frequency", "idx"],
                      toa_rad.transpose(1, 0),
                      {"units": "W m^-2 Hz^-1 sr^-1 "
-                               "(ARTS/DISORT spectral radiance)",
-                      "zenith_angle": float(za_grid[za_index])}),
+                               "(ARTS/DISORT spectral radiance)"}),
                 "altitude_min": (["idx"], altitude.min(axis=1),
                                   {"units": "m"}),
                 "altitude_max": (["idx"], altitude.max(axis=1),
@@ -652,6 +658,7 @@ def main():
                                 {"units": "cm^-1"}),
             },
         )
+        fax.add_iasi_los_metadata(ds, chunk_los)
 
         if export_full_field:
             # full altitude-resolved cube, (frequency, idx, lev, zenith, azim),
@@ -666,7 +673,7 @@ def main():
         if export_results:
             fname = (
                 f"Reference_radiance_TOA_Nf{N_wvn}"
-                f"_Nza{N_za}_{setup_name}"
+                f"_Nza{N_za}_{output_setup_name}"
             )
             if n_chunks > 1:
                 fname += f"_chunk{ck:03d}"

@@ -62,7 +62,8 @@ assert variant in ("baseline", "scaled", "exomol")
 
 # patched catalog used by the non-baseline variants
 patched_catalog = (script_dir.parent /
-                   {"scaled": "catalog_co2x10",
+                   {"baseline": "arts-cat-data",
+                    "scaled": "catalog_co2x10",
                     "exomol": "catalog_co2exomol"}[variant])
 scale_range = (2398.0, 2520.0)     # cm^-1, documented in the file attrs
 scale_factor = 10.0
@@ -109,12 +110,14 @@ def run_variant():
 
     n_total = int(atmdata.sizes["idx"])
     end_column = min(start_column + n_columns, n_total)
-    col_ids = np.arange(start_column, end_column)
+    col_positions = np.arange(start_column, end_column)
+    col_ids = atmdata["idx"].values[start_column:end_column]
+    los = fax.load_iasi_los(frb.satdata_file, col_ids)
     species_list = [spc for spc in atmdata.data_vars
                     if spc not in ("p", "t", "alt")]
 
     atms, T_surfs, geo_positions = [], [], []
-    for j in col_ids:
+    for j in col_positions:
         atms.append(frb.make_gridded_field(
             atmdata["p"].values[j][::-1],
             atmdata["t"].values[j][::-1],
@@ -164,7 +167,7 @@ def run_variant():
 
     operator = None
     channel_wvn = None
-    bt_all = []
+    bt_all, bt_los_all = [], []
 
     for c0 in range(0, len(col_ids), chunk_size):
         c1 = min(c0 + chunk_size, len(col_ids))
@@ -201,6 +204,11 @@ def run_variant():
             np.array(r)[:, -1, zi, 0] for r in
             results["array_of_spectral_radiance_clearsky"]
         ]).T                          # (N_wvn, n_col), TOA level = last
+        toa_field = np.stack([
+            np.asarray(r)[:, -1, :, :] for r in
+            results["array_of_spectral_radiance_clearsky"]])
+        toa_los = fax.interpolate_to_iasi_los(
+            toa_field, za_grid, results["azimuth_angle"], los[c0:c1]).T
 
         if operator is None:
             operator, channel_wvn = fax.build_srf_channel_operator(
@@ -213,6 +221,8 @@ def run_variant():
         bt = fax.radiance2brightness_temp(
             fax.convolve_with_srf_to_channels(toa, operator), channel_wvn)
         bt_all.append(bt)
+        bt_los_all.append(fax.radiance2brightness_temp(
+            fax.convolve_with_srf_to_channels(toa_los, operator), channel_wvn))
         print(f"  chunk {c0 // chunk_size + 1}: columns {col_ids[c0]}.."
               f"{col_ids[c1 - 1]} done ({time.time() - t0:.0f} s)")
 
@@ -236,17 +246,26 @@ def run_variant():
     )
     ds.to_netcdf(str(out))
     print(f"  exported {out}")
+    los_ds = ds.copy(deep=True)
+    los_ds["brightness_temperature"].values[:] = np.concatenate(bt_los_all, axis=1)
+    fax.add_iasi_los_metadata(los_ds, los)
+    los_dir = results_dir / "iasi_los"
+    los_dir.mkdir(parents=True, exist_ok=True)
+    los_out = los_dir / out.name
+    los_ds.to_netcdf(str(los_out))
+    print(f"  exported {los_out}")
 
 
 # =============================================================================
 # %% comparison (runs once both variants are present)
 # =============================================================================
 
-def compare_and_plot():
+def compare_and_plot(los_mode=False):
     import matplotlib.pyplot as plt
     import compare_convolved_with_obs as ccow
 
-    files = {v: results_dir / f"Reference_BT_{v}_Nf{N_wvn}.nc"
+    product_dir = results_dir / "iasi_los" if los_mode else results_dir
+    files = {v: product_dir / f"Reference_BT_{v}_Nf{N_wvn}.nc"
              for v in ("baseline", "scaled", "exomol")}
     for v in list(files):
         if not files[v].exists():
@@ -255,8 +274,13 @@ def compare_and_plot():
         return
     variants = [v for v in ("scaled", "exomol") if v in files]
 
-    bt = {v: xr.open_dataset(f)["brightness_temperature"].values
-          for v, f in files.items()}          # (N_ch, n_col)
+    bt = {}
+    for v, f in files.items():
+        with xr.open_dataset(f) as product:
+            signature = fax.viewing_geometry_signature(product)
+            if (signature[0] == "iasi_los") != los_mode:
+                raise ValueError(f"{f}: unexpected viewing geometry")
+            bt[v] = product["brightness_temperature"].values
     ds = xr.open_dataset(files["baseline"])
     wch = ds["wavenumber"].values
     cols = ds["idx"].values
@@ -270,11 +294,15 @@ def compare_and_plot():
     # full-run reference for the same columns (chunk000 holds col 0..1999)
     import glob
     full = None
+    production_run = ("fmip_radiance_batch_slurm_iasi_los_Nf108951_Nza20"
+                      if los_mode else "fmip_radiance_batch_slurm_Nf108951_Nza20")
     for f in sorted(glob.glob(str(
-            script_dir.parent / "results/RADIANCE/"
-            "fmip_radiance_batch_slurm_Nf108951_Nza20/"
+            script_dir.parent / "results/RADIANCE/" /
+            production_run /
             "Reference_convolved_*.nc"))):
         d = xr.open_dataset(f)
+        if (fax.viewing_geometry_signature(d)[0] == "iasi_los") != los_mode:
+            raise ValueError(f"{f}: unexpected viewing geometry")
         idx = d["idx"].values
         if idx.min() <= cols[0] and idx.max() >= cols[-1]:
             full = d["brightness_temperature"].values[
@@ -342,7 +370,8 @@ def compare_and_plot():
                  fontsize=11)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     plot_dir.mkdir(parents=True, exist_ok=True)
-    fig_file = plot_dir / "fig_co2_nu3_scaling_test.png"
+    suffix = "_iasi_los" if los_mode else ""
+    fig_file = plot_dir / f"fig_co2_nu3_scaling_test{suffix}.png"
     fig.savefig(fig_file, dpi=200)
     print(f"  wrote {fig_file}")
 
@@ -354,3 +383,4 @@ def compare_and_plot():
 if __name__ == "__main__":
     run_variant()
     compare_and_plot()
+    compare_and_plot(los_mode=True)

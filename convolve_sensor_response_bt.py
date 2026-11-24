@@ -330,6 +330,7 @@ def main():
     channel_wvn = None
     channel_frequency = None
     f_grid_ref = None
+    geometry_ref = None
     t_operator = 0.0
 
     for ck, radiance_file in enumerate(radiance_files):
@@ -353,9 +354,12 @@ def main():
             spectral_radiance_field = radiance_ds["spectral_radiance_field"].values
 
         # Get metadata from the dataset
-        zenith_angle = radiance_ds["spectral_radiance_TOA"].attrs.get(
-            "zenith_angle", 180.0
-        )
+        geometry = fax.viewing_geometry_signature(radiance_ds)
+        if geometry_ref is None:
+            geometry_ref = geometry
+        elif geometry != geometry_ref:
+            raise ValueError(f"{radiance_file.name}: inconsistent viewing geometry")
+        zenith_angle = radiance_ds["spectral_radiance_TOA"].attrs.get("zenith_angle")
 
         n_wvn, n_idx = spectral_radiance_TOA.shape
         print(f"  Radiance shape: {spectral_radiance_TOA.shape}")
@@ -466,7 +470,6 @@ def main():
                                    "SRF convolution (Planck inversion of the "
                                    "full-resolution radiance), on the "
                                    "simulation grid frequency_sim",
-                    "zenith_angle": float(zenith_angle),
                 },
             )
         if export_convolved_bt:
@@ -479,10 +482,12 @@ def main():
                                    "in BT space, sensor channel grid (NOT the "
                                    "physical instrument response -- see "
                                    "planck_inversion_method attr)",
-                    "zenith_angle": float(zenith_angle),
                     "srf_normalization_factor": float(srf_norm_factor),
                 },
             )
+        if zenith_angle is not None:
+            for _, _, attrs in output_vars.values():
+                attrs["zenith_angle"] = float(zenith_angle)
 
         output_ds = xr.Dataset(
             output_vars,
@@ -494,6 +499,9 @@ def main():
                 "wavenumber": ("frequency", channel_wvn, {"units": "cm^-1"}),
             },
         )
+        for name in ("iasi_los", "viewing_zenith_angle"):
+            if name in radiance_ds:
+                output_ds[name] = radiance_ds[name]
         if export_monochromatic_bt:
             # simulation grid of the input file, kept for the full-resolution
             # monochromatic diagnostic

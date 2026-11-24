@@ -23,6 +23,8 @@ Notes
   increasing and free of duplicated coordinates.
 * altitude_min / altitude_max are identical in every frequency chunk, so they
   are taken from the first file instead of stacked.
+* IASI LOS metadata is preserved per column and checked across frequency
+  chunks; legacy nadir files without LOS metadata remain supported.
 * Only the run name is a constant at the top of this file; the setup base
   name and the chunk-file glob are derived from it, consistent with the
   other scripts.
@@ -38,6 +40,7 @@ import pathlib
 
 import numpy as np
 import xarray as xr
+import frtmip_aux_functions as fax
 
 
 # =============================================================================
@@ -127,6 +130,16 @@ def main():
                     f"{fmaxs[i]:e} >= {fmins[i + 1]:e}"
                 )
 
+        geometry = fax.viewing_geometry_signature(dss[0])
+        for ds in dss[1:]:
+            if fax.viewing_geometry_signature(ds) != geometry:
+                raise ValueError("frequency chunks have different viewing geometry")
+            if not np.array_equal(ds["idx"].values, dss[0]["idx"].values):
+                raise ValueError("frequency chunks have different column indices")
+            for name in ("iasi_los", "viewing_zenith_angle"):
+                if name in dss[0] and not ds[name].identical(dss[0][name]):
+                    raise ValueError(f"frequency chunks have different {name}")
+
         # concatenate the radiance (and the frequency-dependent coords);
         # join="outer" because the chunk frequency grids differ by design
         # (pinned explicitly -- xarray will change the default to "exact")
@@ -145,9 +158,11 @@ def main():
 
         # per-column scalars are identical across frequency chunks -> take
         # them from the first file
-        for var in ("altitude_min", "altitude_max"):
+        for var in ("altitude_min", "altitude_max", "iasi_los",
+                    "viewing_zenith_angle"):
             if var in dss[0]:
                 merged[var] = dss[0][var]
+        merged.attrs.update(dss[0].attrs)
 
         # sanity: every column chunk group covers the same columns
         idx_all = merged["idx"].values

@@ -124,7 +124,8 @@ setup_name = "fmip_radiance_batch_slurm"
 # results/RADIANCE/<run_name>/ (shared by all frequency chunks of this
 # launch), keeping different runs/configurations apart. Passed to the
 # sub-scripts through the config.
-run_name = f"{setup_name}_Nf{N_wvn}_Nza{N_za}"
+output_setup_name = f"{setup_name}_iasi_los"
+run_name = f"{output_setup_name}_Nf{N_wvn}_Nza{N_za}"
 
 # SLURM job log files (*.out / *.err): Slurm writes them into the directory
 # the submission runs from, so sbatch_simple is dispatched with this folder
@@ -218,6 +219,8 @@ def main():
             "identifier": identifier,
             # FluxSimulator setup of this chunk -> own LUT cache dir
             "flxsim_setup": f"{setup_name}_{identifier}",
+            "output_setup_name": output_setup_name,
+            "viewing_geometry": "iasi_los",
             "start_column": int(start_column),
             "n_columns": int(n_to_run),
             "chunk_size": int(chunk_size),

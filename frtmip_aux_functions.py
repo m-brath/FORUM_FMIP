@@ -43,6 +43,117 @@ M_d = 28.965369e-3  # kg mol^-1
 R_D = R / M_d  # J K^-1 kg^-1
 
 
+# =============================================================================
+# %% IASI viewing geometry
+# =============================================================================
+
+def load_iasi_los(satdata_file, column_ids):
+    """Return signed IASI off-nadir angles matched to atmospheric idx values."""
+    column_ids = np.asarray(column_ids)
+    if column_ids.ndim != 1 or np.unique(column_ids).size != column_ids.size:
+        raise ValueError("requested atmospheric idx values must be unique and 1-D")
+    with xr.open_dataset(satdata_file) as satellite:
+        idx = np.asarray(satellite["idx"].values)
+        los = np.asarray(satellite["los"].values)
+    if (idx.ndim != 1 or los.ndim != 1 or idx.size != los.size
+            or np.unique(idx).size != idx.size):
+        raise ValueError("satdata idx and positional los must be unique and aligned")
+    positions = {value: i for i, value in enumerate(idx)}
+    missing = [value for value in column_ids if value not in positions]
+    if missing:
+        raise ValueError(f"satdata has no observation for idx {missing[:5]}")
+    selected = np.asarray([los[positions[value]] for value in column_ids],
+                          dtype=float)
+    if not np.all(np.isfinite(selected)) or np.any(np.abs(selected) >= 90):
+        raise ValueError("IASI LOS must be finite and within 90 degrees of nadir")
+    return selected
+
+
+def interpolate_to_iasi_los(toa_field, zenith_grid, azimuth_grid, los):
+    """Interpolate (idx, frequency, zenith, azimuth) TOA radiance in cos(za)."""
+    field = np.asarray(toa_field)
+    za = np.asarray(zenith_grid, dtype=float)
+    aa = np.asarray(azimuth_grid, dtype=float)
+    los = np.asarray(los, dtype=float)
+    if (field.ndim != 4 or za.ndim != 1 or aa.ndim != 1 or los.ndim != 1
+            or field.shape != (los.size, field.shape[1], za.size, aa.size)):
+        raise ValueError("TOA field, LOS and angular grid dimensions do not match")
+    if aa.size != 1 or not np.isfinite(aa[0]):
+        raise ValueError("IASI LOS extraction requires a single azimuth")
+    if (za.size < 2 or not np.all(np.isfinite(za))
+            or np.any((za < 0) | (za > 180))
+            or not (np.all(np.diff(za) > 0) or np.all(np.diff(za) < 0))):
+        raise ValueError("zenith grid must be finite, strictly monotonic and in [0, 180]")
+    if not np.all(np.isfinite(los)) or np.any(np.abs(los) >= 90):
+        raise ValueError("IASI LOS must be finite and within 90 degrees of nadir")
+    target = 180.0 - np.abs(los)
+    order = np.argsort(za)
+    za_sorted = za[order]
+    if np.any(target < za_sorted[0]) or np.any(target > za_sorted[-1]):
+        raise ValueError("IASI zenith angles are outside the simulated grid")
+    upper = np.searchsorted(za_sorted, target, side="left")
+    lower = np.maximum(upper - 1, 0)
+    if np.any(za_sorted[lower] < 90):
+        raise ValueError("IASI interpolation would cross the horizon")
+    lower_idx, upper_idx = order[lower], order[upper]
+    mu = np.cos(np.deg2rad(za_sorted))
+    mu_target = np.cos(np.deg2rad(target))
+    denominator = mu[upper] - mu[lower]
+    weight = np.zeros_like(target)
+    np.divide(mu_target - mu[lower], denominator, out=weight,
+              where=denominator != 0)
+    rows = np.arange(los.size)
+    low = field[rows, :, lower_idx, 0]
+    high = field[rows, :, upper_idx, 0]
+    return low + weight[:, None] * (high - low)
+
+
+def add_iasi_los_metadata(dataset, los):
+    """Attach the per-column observation and ARTS viewing angles."""
+    los = np.asarray(los, dtype=float)
+    if los.ndim != 1 or los.size != dataset.sizes["idx"]:
+        raise ValueError("LOS metadata does not match the dataset columns")
+    dataset["iasi_los"] = ("idx", los, {
+        "units": "degrees", "description": "signed local off-nadir IASI view angle"})
+    dataset["viewing_zenith_angle"] = ("idx", 180.0 - np.abs(los), {
+        "units": "degrees", "description": "ARTS zenith angle at TOA"})
+    dataset.attrs["viewing_geometry"] = "iasi_los"
+    dataset.attrs["viewing_angle_source"] = "satdata.nc:los"
+    dataset.attrs["viewing_interpolation"] = "linear in cosine of ARTS zenith angle"
+    dataset.attrs["viewing_azimuth"] = "azimuth-independent, single simulated azimuth"
+
+
+def viewing_geometry_signature(dataset):
+    """Validate viewing metadata and return a signature for compatible chunks."""
+    mode = dataset.attrs.get("viewing_geometry")
+    names = ("iasi_los", "viewing_zenith_angle")
+    present = [name in dataset for name in names]
+    if mode == "iasi_los":
+        if not all(present):
+            raise ValueError("IASI LOS product is missing per-column viewing angles")
+        los = dataset["iasi_los"]
+        za = dataset["viewing_zenith_angle"]
+        if (los.dims != ("idx",) or za.dims != ("idx",)
+                or not np.all(np.isfinite(los.values))
+                or np.any(np.abs(los.values) >= 90)
+                or not np.allclose(za.values, 180 - np.abs(los.values),
+                                   rtol=0, atol=1e-10)):
+            raise ValueError("invalid or inconsistent IASI LOS metadata")
+        method = dataset.attrs.get("viewing_interpolation")
+        azimuth = dataset.attrs.get("viewing_azimuth")
+        source = dataset.attrs.get("viewing_angle_source")
+        if not method or not azimuth or not source:
+            raise ValueError("IASI LOS viewing provenance is incomplete")
+        return (mode, method, azimuth, source)
+    if any(present) or mode not in (None, "nadir"):
+        raise ValueError("inconsistent or unsupported viewing geometry metadata")
+    angles = {float(var.attrs["zenith_angle"]) for var in dataset.data_vars.values()
+              if "zenith_angle" in var.attrs}
+    if len(angles) > 1:
+        raise ValueError("inconsistent scalar viewing angles")
+    return ("legacy", next(iter(angles), None))
+
+
 
 # =============================================================================
 # Helper: molecular formula formatter
